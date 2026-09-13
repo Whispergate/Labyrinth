@@ -11,6 +11,8 @@ Source Control (Forgejo)  →  Build (Jenkins + Docker runners)  →  Obfuscate 
     →  Package (Erebus)  →  Test (Sphinx → LitterBox → EDR)  →  Verdict in Mythic
 ```
 
+![Labyrinth Architecture](https://github.com/Whispergate/Labyrinth/assets/LabyrinthArchitecture.png)
+
 ### Range Hosts
 
 | VLAN | IP | Hostname | Role |
