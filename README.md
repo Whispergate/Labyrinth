@@ -1,6 +1,6 @@
 # Labyrinth
 
-Malware-as-a-Service (MAAS) Ludus cyber range. A fully automated offensive development pipeline deployed on [Ludus](https://docs.ludus.cloud), featuring CI/CD-driven payload compilation, obfuscation, and automated EDR evasion testing.
+Malware-as-a-Service (MAAS) Ludus cyber range. Automated offensive development pipeline on [Ludus](https://docs.ludus.cloud) with CI/CD-driven payload compilation, obfuscation, and EDR evasion testing.
 
 Based on [Joff Thyer's MAAS concept](https://github.com/yoda66/MAAS) (WWHF 2023), extended with Forgejo, Jenkins, Mythic C2 eventing, and Elastic EDR detonation testing.
 
@@ -18,7 +18,6 @@ Source Control (Forgejo)  →  Build (Jenkins + Docker runners)  →  Obfuscate 
 | 10 | .10 | elastic | Elasticsearch + Kibana + Fleet Server |
 | 10 | .11 | victimEDR | EDR detonation target (Elastic Agent + Whiskers) |
 | 10 | .12 | victim | Baseline target (no EDR) |
-| 99 | .1 | kali | Operator workstation |
 | 99 | .2 | forgejo | Forgejo Git server |
 | 99 | .3 | jenkins | Jenkins CI/CD controller |
 | 99 | .4 | runner-lin01 | Linux Docker build runner |
@@ -31,36 +30,25 @@ Source Control (Forgejo)  →  Build (Jenkins + Docker runners)  →  Obfuscate 
 
 ## Existing Roles (Ansible Galaxy)
 
-These roles are already published under the `whispergate` namespace:
+Published under the `whispergate` and `badsectorlabs` namespaces:
 
-- `whispergate.ludus_forgejo` — Forgejo server
-- `whispergate.ludus_jenkins` — Jenkins CI via Docker
-- `whispergate.ludus_mythic_teamserver` — Mythic C2 + agents + eventing containers
-- `whispergate.ludus_litterbox` — LitterBox sandbox
-- `whispergate.ludus_litterbox_whiskers_agent` — Whiskers agent on EDR target
-- `whispergate.ludus_threat_hunting` — Zeek + RITA sensor/agent
-- `badsectorlabs.ludus_elastic_container` — Elastic Stack
-- `badsectorlabs.ludus_elastic_agent` — Elastic Agent enrollment
-
-## New Roles (This Repo)
-
-These roles are defined in `roles/` and need to be installed on the Ludus host:
-
-| Role | Description |
-|------|-------------|
-| `ludus_jenkins_agent` | Linux Jenkins agent with Docker, connects to controller via WebSocket |
-| `ludus_jenkins_agent_windows` | Windows Jenkins agent service (NSSM-managed), Java 17 |
-| `ludus_maas_builders` | Builds Docker toolchain images: `maas-builder-c` (MinGW + Clang + OLLVM), `maas-builder-go` (Go + Garble), `maas-builder-nim` (Nim + winim) |
-| `ludus_vs_build_tools` | Silent install of VS 2022 Build Tools + Windows SDK + .NET SDK |
+- `whispergate.ludus_forgejo` - Forgejo server
+- `whispergate.ludus_jenkins` - Jenkins CI via Docker
+- `whispergate.ludus_mythic_teamserver` - Mythic C2 + agents + eventing containers
+- `whispergate.ludus_litterbox` - LitterBox sandbox
+- `whispergate.ludus_litterbox_whiskers_agent` - Whiskers agent on EDR target
+- `whispergate.ludus_threat_hunting` - Zeek + RITA sensor/agent
+- `badsectorlabs.ludus_elastic_container` - Elastic Stack
+- `badsectorlabs.ludus_elastic_agent` - Elastic Agent enrollment
 
 ## Pipeline
 
 The `pipeline/` directory contains:
 
-- `Jenkinsfile` — Parameterised multi-stage pipeline (compile → obfuscate → sanitise → scan → archive)
-- `build-profiles.yml` — Preset build configurations (quick-test, evasive-c, garble-go, etc.)
-- `tools/pe-sanitise.py` — Strips Rich headers, timestamps, debug directories from PE files
-- `setup-forgejo-repos.sh` — Creates orgs, repos, and Jenkins webhooks on Forgejo
+- `Jenkinsfile` - Parameterised multi-stage pipeline (compile → obfuscate → sanitise → scan → archive)
+- `build-profiles.yml` - Preset build configurations (quick-test, evasive-c, garble-go, etc.)
+- `tools/pe-sanitise.py` - Strips Rich headers, timestamps, debug directories from PE files
+- `setup-forgejo-repos.sh` - Creates orgs, repos, and Jenkins webhooks on Forgejo
 
 ## Deployment
 
@@ -74,19 +62,17 @@ ludus ansible role add whispergate.ludus_litterbox_whiskers_agent
 ludus ansible role add whispergate.ludus_threat_hunting
 ludus ansible role add badsectorlabs.ludus_elastic_container
 ludus ansible role add badsectorlabs.ludus_elastic_agent
+ludus ansible role add whispergate.ludus_vs_build_tools
+ludus ansible role add whispergate.ludus_maas_builders
+ludus ansible role add badsectorlabs.ludus_jenkins_agent_windows
+ludus ansible role add badsectorlabs.ludus_jenkins_agent
 
-# 2. Install local roles from this repo
-ludus ansible role add-local roles/ludus_jenkins_agent
-ludus ansible role add-local roles/ludus_jenkins_agent_windows
-ludus ansible role add-local roles/ludus_maas_builders
-ludus ansible role add-local roles/ludus_vs_build_tools
-
-# 3. Deploy the range
+# 2. Deploy the range
 ludus range config set -f range-config.yml
 ludus range deploy
 
-# 4. After deployment — set up Forgejo repos and webhooks
-# Edit setup-forgejo-repos.sh with your range number, then:
+# 3. After deployment - set up Forgejo repos and webhooks
+# Edit setup-forgejo-repos.sh with your range second octet, then:
 bash pipeline/setup-forgejo-repos.sh
 ```
 
@@ -100,9 +86,9 @@ bash pipeline/setup-forgejo-repos.sh
 
 ## References
 
-- [MAAS (original)](https://github.com/yoda66/MAAS) — Joff Thyer, WWHF 2023
-- [Erebus](https://github.com/Whispergate/Erebus) — Initial access packaging
-- [Sphinx](https://github.com/Whispergate/Sphinx) — LitterBox ↔ Mythic eventing bridge
-- [Daedalus](https://github.com/Whispergate/Daedalus) — CI/CD ↔ Mythic eventing bridge
+- [MAAS (original)](https://github.com/yoda66/MAAS) - Joff Thyer, WWHF 2023
+- [Erebus](https://github.com/Whispergate/Erebus) - Initial access packaging
+- [Sphinx](https://github.com/Whispergate/Sphinx) - LitterBox ↔ Mythic eventing bridge
+- [Daedalus](https://github.com/Whispergate/Daedalus) - CI/CD ↔ Mythic eventing bridge
 - [Mythic C2](https://github.com/its-a-feature/Mythic)
 - [Ludus](https://docs.ludus.cloud)
