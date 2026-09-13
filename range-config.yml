@@ -135,6 +135,17 @@ ludus:
     linux: true
     roles:
       - whispergate.ludus_mythic_teamserver
+    role_vars:
+      ludus_mythic_agents:
+        - https://github.com/MythicAgents/forge
+        - https://github.com/Whispergate/Starburst
+        - https://github.com/Whispergate/Erebus
+        - https://github.com/Whispergate/Ariadne
+        - https://github.com/Whispergate/Sphinx
+        - https://github.com/Whispergate/Daedalus
+      ludus_mythic_c2_profiles:
+        - https://github.com/MythicC2Profiles/http
+        - https://github.com/MythicC2Profiles/smb
   - vm_name: '{{ range_id }}-runner-win01'
     hostname: '{{ range_id }}-runner-win01'
     template: win2022-server-x64-template
