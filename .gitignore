@@ -1,0 +1,6 @@
+Planning/
+*.pyc
+__pycache__/
+.env
+*.key
+*.pem

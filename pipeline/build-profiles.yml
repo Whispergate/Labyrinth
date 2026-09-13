@@ -1,0 +1,54 @@
+profiles:
+  quick-test:
+    description: "Fast MinGW build with static-only scan"
+    language: c-mingw
+    output_format: exe
+    obfuscation: none
+    pe_sanitise: false
+    litterbox_scan: true
+    scan_type: static
+
+  evasive-c:
+    description: "OLLVM-obfuscated C loader with full scan"
+    language: c-ollvm
+    output_format: exe
+    obfuscation: ollvm-full
+    pe_sanitise: true
+    litterbox_scan: true
+    scan_type: all
+
+  evasive-c-dll:
+    description: "OLLVM DLL for sideloading"
+    language: c-ollvm
+    output_format: dll
+    obfuscation: ollvm-bcf-cff
+    pe_sanitise: true
+    litterbox_scan: true
+    scan_type: all
+
+  garble-go:
+    description: "Garble-obfuscated Go loader"
+    language: go-garble
+    output_format: exe
+    obfuscation: garble-literals
+    pe_sanitise: true
+    litterbox_scan: true
+    scan_type: all
+
+  nim-loader:
+    description: "Nim cross-compiled loader"
+    language: nim
+    output_format: exe
+    obfuscation: string-encrypt
+    pe_sanitise: true
+    litterbox_scan: true
+    scan_type: all
+
+  dotnet-loader:
+    description: "Self-contained trimmed C# loader"
+    language: csharp
+    output_format: exe
+    obfuscation: none
+    pe_sanitise: true
+    litterbox_scan: true
+    scan_type: edr
