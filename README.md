@@ -64,8 +64,8 @@ ludus ansible role add badsectorlabs.ludus_elastic_container
 ludus ansible role add badsectorlabs.ludus_elastic_agent
 ludus ansible role add whispergate.ludus_vs_build_tools
 ludus ansible role add whispergate.ludus_maas_builders
-ludus ansible role add badsectorlabs.ludus_jenkins_agent_windows
-ludus ansible role add badsectorlabs.ludus_jenkins_agent
+ludus ansible role add whispergate.ludus_jenkins_agent_windows
+ludus ansible role add whispergate.ludus_jenkins_agent
 
 # 2. Deploy the range
 ludus range config set -f range-config.yml
