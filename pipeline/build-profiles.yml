@@ -17,6 +17,15 @@ profiles:
     litterbox_scan: true
     scan_type: all
 
+  evasive-c-heavy:
+    description: "Maximum OLLVM obfuscation - all passes, high iteration"
+    language: c-ollvm
+    output_format: exe
+    obfuscation: ollvm-heavy
+    pe_sanitise: true
+    litterbox_scan: true
+    scan_type: all
+
   evasive-c-dll:
     description: "OLLVM DLL for sideloading"
     language: c-ollvm

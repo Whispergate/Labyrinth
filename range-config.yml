@@ -41,6 +41,7 @@ ludus:
     roles:
       - whispergate.ludus_threat_hunting
     role_vars:
+      ludus_whiskers_autostart: true
       ludus_threat_hunting_mode: agent
       ludus_threat_hunting_sensor_ip: 10.{{ range_second_octet }}.99.13
   - vm_name: '{{ range_id }}-forgejo'
@@ -87,9 +88,22 @@ ludus:
         - ssh-agent
         - timestamper
         - ansicolor
+      ludus_jenkins_static_agents:
+        - name: runner-lin01
+          labels: linux-c linux-go linux-nim linux-generic
+          remote_fs: /opt/jenkins-agent
+          executors: 2
+        - name: runner-lin02
+          labels: linux-c linux-go linux-nim linux-generic
+          remote_fs: /opt/jenkins-agent
+          executors: 2
+        - name: runner-win01
+          labels: windows-msvc windows-dotnet
+          remote_fs: C:\Jenkins
+          executors: 2
   - vm_name: '{{ range_id }}-runner-lin01'
     hostname: '{{ range_id }}-runner-lin01'
-    template: debian-12-x64-server-template
+    template: debian-13-x64-server-template
     vlan: 99
     ip_last_octet: 4
     ram_gb: 8
@@ -102,13 +116,14 @@ ludus:
       ludus_jenkins_url: http://10.{{ range_second_octet }}.99.3:8080
       ludus_jenkins_agent_name: runner-lin01
       ludus_jenkins_agent_labels: linux-c linux-go linux-nim linux-generic
+      ludus_jenkins_admin_password: JenkinsPW1!
       ludus_maas_builder_images:
         - maas-builder-c
         - maas-builder-go
         - maas-builder-nim
   - vm_name: '{{ range_id }}-runner-lin02'
     hostname: '{{ range_id }}-runner-lin02'
-    template: debian-12-x64-server-template
+    template: debian-13-x64-server-template
     vlan: 99
     ip_last_octet: 5
     ram_gb: 8
@@ -121,6 +136,7 @@ ludus:
       ludus_jenkins_url: http://10.{{ range_second_octet }}.99.3:8080
       ludus_jenkins_agent_name: runner-lin02
       ludus_jenkins_agent_labels: linux-c linux-go linux-nim linux-generic
+      ludus_jenkins_admin_password: JenkinsPW1!
       ludus_maas_builder_images:
         - maas-builder-c
         - maas-builder-go
@@ -161,6 +177,7 @@ ludus:
       ludus_jenkins_url: http://10.{{ range_second_octet }}.99.3:8080
       ludus_jenkins_agent_name: runner-win01
       ludus_jenkins_agent_labels: windows-msvc windows-dotnet
+      ludus_jenkins_admin_password: JenkinsPW1!
   - vm_name: '{{ range_id }}-commando'
     hostname: '{{ range_id }}-commando'
     template: commando-vm-template

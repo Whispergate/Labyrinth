@@ -4,7 +4,7 @@ pipeline {
     parameters {
         choice(name: 'LANGUAGE', choices: ['c-mingw', 'c-ollvm', 'go-garble', 'nim', 'csharp'], description: 'Toolchain for compilation')
         choice(name: 'OUTPUT_FORMAT', choices: ['exe', 'dll', 'shellcode'], description: 'Output format')
-        choice(name: 'OBFUSCATION', choices: ['none', 'ollvm-cff', 'ollvm-bcf-cff', 'ollvm-full', 'garble-literals', 'string-encrypt'], description: 'Obfuscation profile')
+        choice(name: 'OBFUSCATION', choices: ['none', 'ollvm-cff', 'ollvm-bcf-cff', 'ollvm-full', 'ollvm-heavy', 'garble-literals', 'string-encrypt'], description: 'Obfuscation profile')
         string(name: 'SHELLCODE_PATH', defaultValue: '', description: 'Path to shellcode binary (relative to repo)')
         string(name: 'MYTHIC_PAYLOAD_UUID', defaultValue: '', description: 'Mythic payload UUID to fetch shellcode from')
         booleanParam(name: 'LITTERBOX_SCAN', defaultValue: true, description: 'Submit to LitterBox after build')
@@ -14,7 +14,6 @@ pipeline {
 
     environment {
         LITTERBOX_URL    = credentials('litterbox-url')
-        LITTERBOX_TOKEN  = credentials('litterbox-token')
         MYTHIC_URL       = credentials('mythic-url')
         MYTHIC_API_TOKEN = credentials('mythic-api-token')
         ARTIFACT_DIR     = "/payloads/${env.BUILD_TAG}"
@@ -30,7 +29,10 @@ pipeline {
         }
 
         stage('Fetch Mythic Payload') {
-            when { expression { params.MYTHIC_PAYLOAD_UUID?.trim() } }
+            when {
+                beforeAgent true
+                expression { params.MYTHIC_PAYLOAD_UUID?.trim() }
+            }
             agent { label 'linux-generic' }
             steps {
                 sh """
@@ -44,7 +46,10 @@ pipeline {
         }
 
         stage('Build - C/MinGW') {
-            when { expression { params.LANGUAGE == 'c-mingw' } }
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'c-mingw' }
+            }
             agent {
                 docker {
                     image 'maas-builder-c'
@@ -56,9 +61,12 @@ pipeline {
                 unstash 'source'
                 script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
                 sh """
+                    mkdir -p shellcode
+                    [ -f shellcode/payload.bin ] || printf '\\xcc' > shellcode/payload.bin
+                    x86_64-w64-mingw32-windres src/resource.rc -o resource.o
                     x86_64-w64-mingw32-gcc -o loader.${params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'} \\
-                        src/loader.c \\
-                        ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
+                        src/main.c src/payload.c src/techniques/*.c resource.o \\
+                        -Isrc ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
                         -lntdll -lkernel32 -mwindows -s -O2
                 """
                 stash includes: "loader.*", name: 'artifact'
@@ -66,7 +74,10 @@ pipeline {
         }
 
         stage('Build - C/OLLVM') {
-            when { expression { params.LANGUAGE == 'c-ollvm' } }
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'c-ollvm' }
+            }
             agent {
                 docker {
                     image 'maas-builder-c'
@@ -77,6 +88,10 @@ pipeline {
             steps {
                 unstash 'source'
                 script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
+                sh """
+                    mkdir -p shellcode
+                    [ -f shellcode/payload.bin ] || printf '\\xcc' > shellcode/payload.bin
+                """
                 script {
                     def ollvmFlags = ''
                     switch (params.OBFUSCATION) {
@@ -86,15 +101,18 @@ pipeline {
                             ollvmFlags = '-mllvm -fla -mllvm -bcf'; break
                         case 'ollvm-full':
                             ollvmFlags = '-mllvm -fla -mllvm -bcf -mllvm -sub'; break
+                        case 'ollvm-heavy':
+                            ollvmFlags = '-mllvm -fla -mllvm -split -mllvm -bcf -mllvm -bcf_prob=100 -mllvm -bcf_loop=3 -mllvm -sub -mllvm -sub_loop=5'; break
                         default:
                             ollvmFlags = ''; break
                     }
                     sh """
+                        x86_64-w64-mingw32-windres src/resource.rc -o resource.o
                         clang --target=x86_64-w64-mingw32 \\
                             ${ollvmFlags} \\
                             -o loader.${params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'} \\
-                            src/loader.c \\
-                            ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
+                            src/main.c src/payload.c src/ntapi.c src/techniques/*.c resource.o \\
+                            -Isrc ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
                             -lntdll -lkernel32 -s -O1
                     """
                 }
@@ -103,7 +121,10 @@ pipeline {
         }
 
         stage('Build - Go/Garble') {
-            when { expression { params.LANGUAGE == 'go-garble' } }
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'go-garble' }
+            }
             agent {
                 docker {
                     image 'maas-builder-go'
@@ -125,7 +146,10 @@ pipeline {
         }
 
         stage('Build - Nim') {
-            when { expression { params.LANGUAGE == 'nim' } }
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'nim' }
+            }
             agent {
                 docker {
                     image 'maas-builder-nim'
@@ -146,7 +170,10 @@ pipeline {
         }
 
         stage('Build - C#') {
-            when { expression { params.LANGUAGE == 'csharp' } }
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'csharp' }
+            }
             agent { label 'windows-dotnet' }
             steps {
                 unstash 'source'
@@ -164,7 +191,10 @@ pipeline {
         }
 
         stage('PE Sanitisation') {
-            when { expression { params.PE_SANITISE } }
+            when {
+                beforeAgent true
+                expression { params.PE_SANITISE }
+            }
             agent { label 'linux-generic' }
             steps {
                 unstash 'artifact'
@@ -189,23 +219,90 @@ pipeline {
         }
 
         stage('LitterBox Scan') {
-            when { expression { params.LITTERBOX_SCAN } }
+            when {
+                beforeAgent true
+                expression { params.LITTERBOX_SCAN }
+            }
             agent { label 'linux-generic' }
             steps {
                 unstash 'final'
-                sh """
-                    grumpycats submit \\
-                        --url "\${LITTERBOX_URL}" \\
-                        --token "\${LITTERBOX_TOKEN}" \\
-                        --scan-type "${params.SCAN_TYPE}" \\
-                        --file loader.* \\
-                        --wait --timeout 300 \\
-                        --output results.json
+                sh """#!/bin/bash
+                    set -euo pipefail
+                    LB="\${LITTERBOX_URL}"
+                    FILE=\$(ls loader.* | head -1)
+                    SCAN_TYPE="${params.SCAN_TYPE}"
+                    TIMEOUT=300
+
+                    echo "[*] Uploading \${FILE} to LitterBox..."
+                    UPLOAD=\$(curl -sf -X POST "\${LB}/upload" \\
+                        -F "file=@\${FILE};type=application/octet-stream")
+                    MD5=\$(echo "\$UPLOAD" | jq -r '.file_info.md5')
+                    if [ -z "\$MD5" ] || [ "\$MD5" = "null" ]; then
+                        echo "[-] Upload failed"; exit 1
+                    fi
+                    echo "[+] Uploaded - MD5: \${MD5}"
+
+                    trigger_scan() {
+                        local type="\$1"
+                        echo "[*] Triggering \${type} scan..."
+                        curl -sf -X POST "\${LB}/analyze/\${type}/\${MD5}" | jq . || true
+                    }
+
+                    poll_scan() {
+                        local url="\$1" elapsed=0 interval=2
+                        while [ \$elapsed -lt \$TIMEOUT ]; do
+                            RESULT=\$(curl -sf "\$url" 2>/dev/null || echo '{}')
+                            STATUS=\$(echo "\$RESULT" | jq -r '.status // empty')
+                            case "\$STATUS" in
+                                completed|blocked_by_av|partial|error|agent_unreachable|early_termination|"")
+                                    return 0 ;;
+                            esac
+                            sleep \$interval
+                            elapsed=\$((elapsed + interval))
+                            interval=\$(( interval * 3 / 2 ))
+                            [ \$interval -gt 15 ] && interval=15
+                        done
+                        echo "[!] Poll timed out after \${TIMEOUT}s"
+                    }
+
+                    case "\$SCAN_TYPE" in
+                        static)
+                            trigger_scan static
+                            sleep 3
+                            ;;
+                        dynamic)
+                            trigger_scan dynamic
+                            poll_scan "\${LB}/api/results/dynamic/\${MD5}"
+                            ;;
+                        edr)
+                            PROFILES=\$(curl -sf "\${LB}/api/edr/profiles" | jq -r '.profiles[].name' 2>/dev/null || true)
+                            for p in \$PROFILES; do
+                                trigger_scan "edr/\${p}"
+                                poll_scan "\${LB}/api/results/edr/\${p}/\${MD5}"
+                            done
+                            ;;
+                        all)
+                            trigger_scan static
+                            trigger_scan dynamic
+                            sleep 3
+                            poll_scan "\${LB}/api/results/dynamic/\${MD5}"
+                            PROFILES=\$(curl -sf "\${LB}/api/edr/profiles" | jq -r '.profiles[].name' 2>/dev/null || true)
+                            for p in \$PROFILES; do
+                                trigger_scan "edr/\${p}"
+                                poll_scan "\${LB}/api/results/edr/\${p}/\${MD5}"
+                            done
+                            ;;
+                    esac
+
+                    echo "[*] Fetching risk assessment..."
+                    curl -sf "\${LB}/api/results/risk/\${MD5}" | jq . > results.json
+                    echo "[+] Results: \${LB}/results/info/\${MD5}"
                 """
                 script {
                     def results = readJSON file: 'results.json'
-                    def risk = results.risk_level
+                    def risk = results.risk_level ?: 'unknown'
                     echo "LitterBox Verdict: ${risk}"
+                    echo "Results URL: ${env.LITTERBOX_URL}/results/info/${results.md5 ?: ''}"
                     if (risk == 'critical' || risk == 'high') {
                         unstable("Payload flagged: ${risk} risk")
                     }
@@ -230,7 +327,7 @@ pipeline {
     post {
         always {
             node('linux-generic') {
-                cleanWs()
+                deleteDir()
             }
         }
     }
