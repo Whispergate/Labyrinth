@@ -108,12 +108,12 @@ pipeline {
                     }
                     sh """
                         x86_64-w64-mingw32-windres src/resource.rc -o resource.o
-                        clang --target=x86_64-w64-mingw32 \\
-                            ${ollvmFlags} \\
-                            -o loader.${params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'} \\
-                            src/main.c src/payload.c src/ntapi.c src/techniques/*.c resource.o \\
-                            -Isrc ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
-                            -lntdll -lkernel32 -s -O1
+                        clang --target=x86_64-w64-mingw32 ${ollvmFlags} \\
+                            -c src/main.c src/payload.c src/ntapi.c src/techniques/*.c -Isrc -O1
+                        x86_64-w64-mingw32-gcc -o loader.${params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'} \\
+                            *.o resource.o \\
+                            ${params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''} \\
+                            -lntdll -lkernel32 -s
                     """
                 }
                 stash includes: "loader.*", name: 'artifact'

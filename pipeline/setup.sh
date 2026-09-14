@@ -422,15 +422,15 @@ BUILD_BLOCK
             ollvm-full)      OLLVM_FLAGS="-mllvm -fla -mllvm -bcf -mllvm -sub" ;;
             ollvm-heavy)     OLLVM_FLAGS="-mllvm -fla -mllvm -split -mllvm -bcf -mllvm -bcf_prob=100 -mllvm -bcf_loop=3 -mllvm -sub -mllvm -sub_loop=5" ;;
           esac
+          clang --target=x86_64-w64-mingw32 $OLLVM_FLAGS \
+            -c src/main.c src/payload.c src/ntapi.c src/techniques/*.c -Isrc -O1
           FMT="${{ inputs.OUTPUT_FORMAT }}"
           if [ "$FMT" = "dll" ]; then
-            clang --target=x86_64-w64-mingw32 $OLLVM_FLAGS \
-              -o build/loader.dll src/main.c src/payload.c src/ntapi.c src/techniques/*.c resource.o \
-              -Isrc -shared -lntdll -lkernel32 -s -O1
+            x86_64-w64-mingw32-gcc -o build/loader.dll \
+              *.o resource.o -shared -lntdll -lkernel32 -s
           else
-            clang --target=x86_64-w64-mingw32 $OLLVM_FLAGS \
-              -o build/loader.exe src/main.c src/payload.c src/ntapi.c src/techniques/*.c resource.o \
-              -Isrc -lntdll -lkernel32 -s -O1
+            x86_64-w64-mingw32-gcc -o build/loader.exe \
+              *.o resource.o -lntdll -lkernel32 -s
           fi
 
 BUILD_BLOCK
