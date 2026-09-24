@@ -1,0 +1,315 @@
+mirrors:
+  # =========================================================================
+  # C# / .NET - GhostPack suite
+  # =========================================================================
+  - name: Rubeus
+    upstream: https://github.com/GhostPack/Rubeus
+    language: csharp
+    description: "Kerberos abuse toolkit"
+
+  - name: Seatbelt
+    upstream: https://github.com/GhostPack/Seatbelt
+    language: csharp
+    description: "Host situational awareness"
+
+  - name: SharpUp
+    upstream: https://github.com/GhostPack/SharpUp
+    language: csharp
+    description: "Privilege escalation checks"
+
+  - name: Certify
+    upstream: https://github.com/GhostPack/Certify
+    language: csharp
+    description: "AD CS abuse"
+
+  - name: SharpDPAPI
+    upstream: https://github.com/GhostPack/SharpDPAPI
+    language: csharp
+    description: "DPAPI credential extraction"
+
+  - name: SharpWMI
+    upstream: https://github.com/GhostPack/SharpWMI
+    language: csharp
+    description: "WMI interaction for lateral movement and remote execution"
+
+  - name: Lockless
+    upstream: https://github.com/GhostPack/Lockless
+    language: csharp
+    description: "Copy locked files by reading raw disk volume"
+
+  - name: SafetyKatz
+    upstream: https://github.com/GhostPack/SafetyKatz
+    language: csharp
+    description: "In-memory Mimikatz execution via PE patching and minidump"
+
+  - name: KeeThief
+    upstream: https://github.com/GhostPack/KeeThief
+    language: csharp
+    description: "Extract KeePass master keys from memory"
+
+  - name: SharpChrome
+    upstream: https://github.com/GhostPack/SharpDPAPI
+    language: csharp
+    description: "Chrome credential and cookie extraction via DPAPI"
+
+  # =========================================================================
+  # C# / .NET - AD attack and enumeration
+  # =========================================================================
+  - name: SharpHound
+    upstream: https://github.com/BloodHoundAD/SharpHound
+    language: csharp
+    description: "BloodHound data collector"
+
+  - name: SharpView
+    upstream: https://github.com/tevora-threat/SharpView
+    language: csharp
+    description: "AD enumeration (PowerView port)"
+
+  - name: StandIn
+    upstream: https://github.com/FuzzySecurity/StandIn
+    language: csharp
+    description: "AD post-exploitation: object manipulation and delegation abuse"
+
+  - name: Whisker
+    upstream: https://github.com/eladshamir/Whisker
+    language: csharp
+    description: "Shadow Credentials attack via msDS-KeyCredentialLink"
+
+  - name: SharpLAPS
+    upstream: https://github.com/swisskyrepo/SharpLAPS
+    language: csharp
+    description: "Retrieve LAPS passwords from Active Directory"
+
+  - name: SharpGPOAbuse
+    upstream: https://github.com/FSecureLABS/SharpGPOAbuse
+    language: csharp
+    description: "Abuse GPOs for privilege escalation and persistence"
+
+  - name: ADCSPwn
+    upstream: https://github.com/bats3c/ADCSPwn
+    language: csharp
+    description: "Privesc via AD Certificate Services"
+
+  - name: Snaffler
+    upstream: https://github.com/SnaffCon/Snaffler
+    language: csharp
+    description: "Find credentials in network shares"
+
+  - name: SharpShares
+    upstream: https://github.com/mitchmoser/SharpShares
+    language: csharp
+    description: "Enumerate accessible network shares across a domain"
+
+  # =========================================================================
+  # C# / .NET - Lateral movement and execution
+  # =========================================================================
+  - name: SharpExec
+    upstream: https://github.com/anthemtotheego/SharpExec
+    language: csharp
+    description: "Lateral movement via WMI, SMB, SCM, and WinRM"
+
+  - name: SharPersist
+    upstream: https://github.com/mandiant/SharPersist
+    language: csharp
+    description: "Windows persistence via registry, scheduled tasks, services"
+
+  - name: SharpMove
+    upstream: https://github.com/0xthirteen/SharpMove
+    language: csharp
+    description: "Lateral movement via WMI, DCOM, SCM, task scheduler"
+
+  - name: SharpRDP
+    upstream: https://github.com/0xthirteen/SharpRDP
+    language: csharp
+    description: "Remote command execution via RDP sendkeys"
+
+  # =========================================================================
+  # C# / .NET - Evasion and loading
+  # =========================================================================
+  - name: NetLoader
+    upstream: https://github.com/Flangvik/NetLoader
+    language: csharp
+    description: "Load .NET assemblies from URL with AMSI/ETW bypass"
+
+  - name: GodPotato
+    upstream: https://github.com/BeichenDream/GodPotato
+    language: csharp
+    description: "Privilege escalation to SYSTEM via potato attack"
+
+  - name: ConfuserEx
+    upstream: https://github.com/mkaring/ConfuserEx
+    language: csharp
+    description: ".NET assembly obfuscator with anti-tamper protection"
+
+  # =========================================================================
+  # BOF collections
+  # =========================================================================
+  - name: CS-Situational-Awareness-BOF
+    upstream: https://github.com/trustedsec/CS-Situational-Awareness-BOF
+    language: c
+    description: "TrustedSec situational awareness BOF collection"
+
+  - name: CS-Remote-OPs-BOF
+    upstream: https://github.com/trustedsec/CS-Remote-OPs-BOF
+    language: c
+    description: "TrustedSec BOFs for remote process injection, registry, services"
+
+  - name: C2-Tool-Collection
+    upstream: https://github.com/outflanknl/C2-Tool-Collection
+    language: c
+    description: "Outflank BOF collection for AD enum, lateral movement, evasion"
+
+  - name: FindObjects-BOF
+    upstream: https://github.com/outflanknl/FindObjects-BOF
+    language: c
+    description: "BOF to enumerate processes by loaded modules or handles"
+
+  - name: CredBandit
+    upstream: https://github.com/xforcered/CredBandit
+    language: c
+    description: "BOF for LSASS minidump using direct syscalls"
+
+  - name: unhook-bof
+    upstream: https://github.com/rsmudge/unhook-bof
+    language: c
+    description: "BOF to remove userland API hooks set by EDR/AV"
+
+  - name: BOF-RegSave
+    upstream: https://github.com/EncodeGroup/BOF-RegSave
+    language: c
+    description: "BOF to dump SAM/SYSTEM/SECURITY registry hives"
+
+  - name: BOFs-ajpc500
+    upstream: https://github.com/ajpc500/BOFs
+    language: c
+    description: "BOFs for ETW patching, process injection, shellcode execution"
+
+  - name: InlineExecute-Assembly
+    upstream: https://github.com/anthemtotheego/InlineExecute-Assembly
+    language: c
+    description: "BOF for inline .NET assembly execution without fork and run"
+
+  # =========================================================================
+  # C / C++ - Process injection, loaders, evasion
+  # =========================================================================
+  - name: nanodump
+    upstream: https://github.com/fortra/nanodump
+    language: c
+    description: "LSASS minidump via syscalls"
+
+  - name: donut
+    upstream: https://github.com/TheWover/donut
+    language: c
+    description: "Generate PIC shellcode from .NET assemblies and PEs"
+
+  - name: mimikatz
+    upstream: https://github.com/gentilkiwi/mimikatz
+    language: c
+    description: "Credential extraction, pass-the-hash, Kerberos attacks"
+
+  - name: BokuLoader
+    upstream: https://github.com/boku7/BokuLoader
+    language: c
+    description: "Cobalt Strike reflective loader with evasion"
+
+  - name: KaynLdr
+    upstream: https://github.com/Cracked5pider/KaynLdr
+    language: c
+    description: "Reflective DLL loader"
+
+  - name: TartarusGate
+    upstream: https://github.com/trickster0/TartarusGate
+    language: c
+    description: "Syscall retrieval from ntdll even when hooks are in place"
+
+  - name: SysWhispers2
+    upstream: https://github.com/jthuraisamy/SysWhispers2
+    language: c
+    description: "Direct syscall stub generation with sorting and hashing"
+
+  - name: SysWhispers3
+    upstream: https://github.com/klezVirus/SysWhispers3
+    language: c
+    description: "Syscall generation with egg-hunter and jumper evasion techniques"
+
+  # =========================================================================
+  # C / C++ - Privilege escalation
+  # =========================================================================
+  - name: PrintSpoofer
+    upstream: https://github.com/itm4n/PrintSpoofer
+    language: c
+    description: "Privilege escalation from service accounts to SYSTEM via print spooler"
+
+  - name: PPLdump
+    upstream: https://github.com/itm4n/PPLdump
+    language: c
+    description: "Dump protected process memory by exploiting LSASS PPL"
+
+  - name: PEzor
+    upstream: https://github.com/phra/PEzor
+    language: c
+    description: "Shellcode and PE packer with anti-debug and evasion"
+
+  # =========================================================================
+  # Go tools
+  # =========================================================================
+  - name: chisel
+    upstream: https://github.com/jpillora/chisel
+    language: go
+    description: "TCP/UDP tunnel over HTTP"
+
+  - name: ligolo-ng
+    upstream: https://github.com/nicocha30/ligolo-ng
+    language: go
+    description: "Tunneling and pivoting tool"
+
+  - name: kerbrute
+    upstream: https://github.com/ropnop/kerbrute
+    language: go
+    description: "Kerberos bruteforce and user enumeration via AS-REQ pre-auth"
+
+  - name: peirates
+    upstream: https://github.com/inguardians/peirates
+    language: go
+    description: "Kubernetes penetration testing and attack tool"
+
+  - name: Limelighter
+    upstream: https://github.com/Tylous/Limelighter
+    language: go
+    description: "Generate fake code-signing certificates for payload signing"
+
+  - name: httpx
+    upstream: https://github.com/projectdiscovery/httpx
+    language: go
+    description: "HTTP probing and tech detection"
+
+  - name: nuclei
+    upstream: https://github.com/projectdiscovery/nuclei
+    language: go
+    description: "Template-based vulnerability scanner"
+
+  - name: subfinder
+    upstream: https://github.com/projectdiscovery/subfinder
+    language: go
+    description: "Fast passive subdomain enumeration"
+
+  # =========================================================================
+  # Rust tools
+  # =========================================================================
+  - name: RustScan
+    upstream: https://github.com/RustScan/RustScan
+    language: rust
+    description: "Fast port scanner that pipes results to Nmap"
+
+  - name: feroxbuster
+    upstream: https://github.com/epi052/feroxbuster
+    language: rust
+    description: "Recursive content discovery and directory brute-forcing"
+
+  # =========================================================================
+  # Packing tools
+  # =========================================================================
+  - name: Calypso
+    upstream: https://github.com/Whispergate/Calypso
+    language: cpp
+    description: "C++23 syscall packer with AMSI/ETW bypass, encryption, and obfuscation"

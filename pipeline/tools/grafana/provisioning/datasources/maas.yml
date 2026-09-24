@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: MAAS-JSON
+    type: marcusolsson-json-datasource
+    uid: maas-json
+    access: proxy
+    url: file:///var/lib/grafana/data/maas
+    isDefault: true
+    editable: false
+    jsonData:
+      queryParams: ""
+
+  - name: MAAS-Infinity
+    type: yesoreyeram-infinity-datasource
+    uid: maas-infinity
+    access: proxy
+    isDefault: false
+    editable: false
+    jsonData:
+      datasource_mode: basic

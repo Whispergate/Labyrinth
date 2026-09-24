@@ -1,6 +1,7 @@
 #ifndef NTAPI_H
 #define NTAPI_H
 
+#include "config.h"
 #include <windows.h>
 
 #ifndef NT_SUCCESS
@@ -43,6 +44,20 @@ typedef NTSTATUS (NTAPI *fnNtMapViewOfSection)(
     PSIZE_T ViewSize, DWORD InheritDisposition, ULONG AllocationType,
     ULONG Win32Protect);
 
+/*
+ * Resolve an NT API function by name.
+ *
+ * When USE_INDIRECT_SYSCALLS is defined, this returns a pointer to
+ * the corresponding indirect-syscall wrapper (e.g. IndirectNtAllocateVirtualMemory).
+ * The caller must still call syscalls_init() once before using ntapi_resolve().
+ *
+ * Without USE_INDIRECT_SYSCALLS, this uses GetProcAddress on ntdll.dll
+ * as before.
+ */
 FARPROC ntapi_resolve(const char *name);
+
+#if USE_INDIRECT_SYSCALLS
+#include "syscalls.h"
+#endif
 
 #endif /* NTAPI_H */

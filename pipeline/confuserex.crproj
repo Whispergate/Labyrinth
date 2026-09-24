@@ -1,0 +1,10 @@
+<project outputDir="./obfuscated" baseDir="." xmlns="http://confuser.codeplex.com">
+  <rule pattern="true">
+    <protection id="ctrl flow" />
+    <protection id="ref proxy" />
+    <protection id="rename" />
+    <protection id="anti debug" />
+    <protection id="constants" />
+  </rule>
+  <!-- module path is injected by the pipeline -->
+</project>

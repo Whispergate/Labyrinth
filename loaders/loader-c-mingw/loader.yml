@@ -1,0 +1,6 @@
+docker_image: maas-builder-c
+agent_label: linux-c
+shellcode_dest: src/shellcode.h
+shellcode_format: c
+volumes:
+  - /payloads:/payloads

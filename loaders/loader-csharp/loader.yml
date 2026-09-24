@@ -1,0 +1,6 @@
+docker_image: maas-builder-dotnet
+agent_label: linux-dotnet
+shellcode_dest: src/Shellcode.cs
+shellcode_format: csharp
+volumes:
+  - /payloads:/payloads

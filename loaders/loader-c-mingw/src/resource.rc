@@ -1,2 +1,0 @@
-#include "resource.h"
-IDR_SHELLCODE RCDATA "../shellcode/payload.bin"

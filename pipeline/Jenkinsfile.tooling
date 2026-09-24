@@ -1,0 +1,391 @@
+// Jenkins pipeline for Daedalus daedalus_obfuscate_build command.
+//
+// Clones a third-party repo, compiles it, optionally obfuscates the
+// output, and archives the artifact. Does NOT fetch shellcode from
+// Mythic - this is for standalone tool compilation.
+//
+// Daedalus calls buildWithParameters on this job (daedalus-tooling-build).
+// Each stage picks the correct Docker image and runner label.
+//
+// Deployed by setup.sh into the daedalus-tooling-build repo.
+
+pipeline {
+    agent none
+
+    parameters {
+        string(name: 'REPO_URL',       defaultValue: '',     description: 'Git clone URL of the tool repo')
+        password(name: 'REPO_TOKEN',   defaultValue: '',     description: 'Access token for private repos (HTTP basic auth)')
+        string(name: 'REF',           defaultValue: 'main',  description: 'Branch or tag to checkout')
+        string(name: 'SOURCE_PATH',   defaultValue: '',      description: 'Subdirectory or file to compile (empty = repo root)')
+        string(name: 'LANGUAGE',      defaultValue: 'csharp', description: 'Build language: csharp, go, rust, c-mingw, cpp-mingw, nim')
+        string(name: 'OUTPUT_FORMAT', defaultValue: 'exe',   description: 'Output format: exe, dll, bin, shellcode, svc')
+        string(name: 'OBFUSCATION',   defaultValue: 'none',  description: 'Obfuscation level: none, basic, full, garble, calypso')
+        string(name: 'PACKER_FLAGS', defaultValue: '',    description: 'Calypso flags: --inject local|remote --execute thread|direct|apc|callback|fiber --syscall indirect|hellsgate|halosgate --cipher aes-cbc|aes-ecb|xor|rc4 --compress none|zlib|lz4|rle --encode none|base64|hex|mac|uuid --amsi --etw --sleep --unhook --sandbox --ppid --block-dlls --module-stomp --drip --entropy-reduce --self-delete --obfuscate --no-antidebug')
+        string(name: 'SIGNING_PROFILE', defaultValue: 'none', description: 'Code signing profile: microsoft, google, intel, custom, none')
+    }
+
+    stages {
+        stage('Clone') {
+            agent { label 'linux-generic' }
+            steps {
+                deleteDir()
+                script {
+                    def cloneUrl = params.REPO_URL
+                    def token = params.REPO_TOKEN?.toString() ?: ''
+                    if (token.trim()) {
+                        cloneUrl = cloneUrl.replaceFirst('https://', "https://token:${token}@")
+                    }
+                    sh "git clone --depth 1 --branch '${params.REF}' '${cloneUrl}' repo"
+                }
+                dir('repo') {
+                    echo "[+] Cloned ${params.REPO_URL} @ ${params.REF}"
+                    sh 'ls -la'
+                }
+                stash includes: 'repo/**', name: 'source'
+            }
+        }
+
+        stage('Build - C/C++') {
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE in ['c-mingw', 'cpp-mingw'] }
+            }
+            agent {
+                docker {
+                    image 'maas-builder-c'
+                    label 'linux-c'
+                    args '-v /payloads:/payloads'
+                }
+            }
+            steps {
+                unstash 'source'
+                dir("repo/${params.SOURCE_PATH ?: '.'}") {
+                    sh 'mkdir -p ${WORKSPACE}/build'
+                    script {
+                        def cc = (params.LANGUAGE == 'cpp-mingw') ? 'x86_64-w64-mingw32-g++' : 'x86_64-w64-mingw32-gcc'
+                        def ext = (params.LANGUAGE == 'cpp-mingw') ? '*.cpp' : '*.c'
+                        sh """#!/bin/bash
+                            set -euo pipefail
+                            if [ -f Makefile ]; then
+                                make CC=${cc} CXX=${cc}
+                                find . -maxdepth 2 \\( -name '*.exe' -o -name '*.dll' -o -name '*.bin' \\) \
+                                    -not -path './build/*' -exec cp {} \${WORKSPACE}/build/ \\;
+                            elif [ -f CMakeLists.txt ]; then
+                                mkdir -p cmake-build && cd cmake-build
+                                cmake .. -DCMAKE_SYSTEM_NAME=Windows \
+                                    -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+                                    -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
+                                make -j\$(nproc)
+                                find . \\( -name '*.exe' -o -name '*.dll' \\) -exec cp {} \${WORKSPACE}/build/ \\;
+                            else
+                                SOURCES=\$(find . -name '${ext}' -not -path './build/*' | sort | tr '\\n' ' ')
+                                ${cc} -o \${WORKSPACE}/build/tool.exe \$SOURCES \
+                                    -lntdll -lkernel32 -mwindows -s -O2
+                            fi
+                        """
+                    }
+                }
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Build - Go') {
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'go' }
+            }
+            agent {
+                docker {
+                    image 'maas-builder-go'
+                    label 'linux-go'
+                    args '-v /payloads:/payloads -v /var/cache/maas/gomod:/go/pkg/mod -v /var/cache/maas/gobuild:/root/.cache/go-build'
+                }
+            }
+            steps {
+                unstash 'source'
+                dir("repo/${params.SOURCE_PATH ?: '.'}") {
+                    sh """#!/bin/bash
+                        set -euo pipefail
+                        mkdir -p \${WORKSPACE}/build
+                        GOOS=windows GOARCH=amd64 go build \
+                            -ldflags="-s -w" \
+                            -o \${WORKSPACE}/build/ \
+                            ./...
+                    """
+                }
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Build - Rust') {
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'rust' }
+            }
+            agent {
+                docker {
+                    image 'maas-builder-rust'
+                    label 'linux-rust'
+                    args '-v /payloads:/payloads -v /var/cache/maas/cargo-registry:/usr/local/cargo/registry -v /var/cache/maas/cargo-git:/usr/local/cargo/git'
+                }
+            }
+            steps {
+                unstash 'source'
+                dir("repo/${params.SOURCE_PATH ?: '.'}") {
+                    sh """#!/bin/bash
+                        set -euo pipefail
+                        mkdir -p \${WORKSPACE}/build
+                        cargo build --release --target x86_64-pc-windows-gnu
+                        cp target/x86_64-pc-windows-gnu/release/*.exe \${WORKSPACE}/build/ 2>/dev/null || true
+                        cp target/x86_64-pc-windows-gnu/release/*.dll \${WORKSPACE}/build/ 2>/dev/null || true
+                    """
+                }
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Build - C#') {
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'csharp' }
+            }
+            agent { label 'windows-dotnet' }
+            steps {
+                unstash 'source'
+                dir("repo\\${params.SOURCE_PATH ?: '.'}") {
+                    script {
+                        def outputType = (params.OUTPUT_FORMAT == 'dll') ? 'Library' : 'Exe'
+                        bat """
+                            @echo off
+                            if exist ${WORKSPACE}\\build rmdir /s /q ${WORKSPACE}\\build
+                            mkdir ${WORKSPACE}\\build
+
+                            set "PROJECT="
+                            for /r %%f in (*.sln) do ( set "PROJECT=%%f" & goto :found )
+                            for /r %%f in (*.csproj) do ( set "PROJECT=%%f" & goto :found )
+                            echo [-] No .sln or .csproj found
+                            exit /b 1
+
+                            :found
+                            echo [*] Building %PROJECT% (OutputType=${outputType})
+
+                            rem Try dotnet build first (SDK-style / .NET 5+ projects)
+                            dotnet build "%PROJECT%" -c Release -o ${WORKSPACE}\\build -p:OutputType=${outputType} 2>nul
+                            if exist "${WORKSPACE}\\build\\*.exe" goto :done
+                            if exist "${WORKSPACE}\\build\\*.dll" goto :done
+
+                            echo [*] dotnet produced no output, trying msbuild
+                            nuget restore "%PROJECT%" 2>nul
+                            msbuild "%PROJECT%" /p:Configuration=Release /p:Platform=AnyCPU /p:OutputPath=${WORKSPACE}\\build /p:OutputType=${outputType} /verbosity:minimal 2>nul
+                            if errorlevel 1 (
+                                msbuild "%PROJECT%" /p:Configuration=Release /p:OutputPath=${WORKSPACE}\\build /p:OutputType=${outputType} /verbosity:minimal
+                            )
+
+                            rem Copy msbuild output to workspace build dir
+                            for /r %%d in (bin\\Release\\*.exe) do copy "%%d" ${WORKSPACE}\\build\\ >nul 2>&1
+                            for /r %%d in (bin\\Release\\*.dll) do copy "%%d" ${WORKSPACE}\\build\\ >nul 2>&1
+                            for /r %%d in (bin\\Release\\net*\\*.exe) do copy "%%d" ${WORKSPACE}\\build\\ >nul 2>&1
+                            for /r %%d in (bin\\Release\\net*\\*.dll) do copy "%%d" ${WORKSPACE}\\build\\ >nul 2>&1
+                            for /r %%d in (bin\\x64\\Release\\*.exe) do copy "%%d" ${WORKSPACE}\\build\\ >nul 2>&1
+                            for /r %%d in (bin\\x64\\Release\\*.dll) do copy "%%d" ${WORKSPACE}\\build\\ >nul 2>&1
+
+                            :done
+                            echo [+] Build output:
+                            dir ${WORKSPACE}\\build\\*.exe ${WORKSPACE}\\build\\*.dll 2>nul || echo    (no binaries found)
+                        """
+                    }
+                }
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Build - Nim') {
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'nim' }
+            }
+            agent {
+                docker {
+                    image 'maas-builder-nim'
+                    label 'linux-generic'
+                    args '-v /payloads:/payloads'
+                }
+            }
+            steps {
+                unstash 'source'
+                dir("repo/${params.SOURCE_PATH ?: '.'}") {
+                    sh """#!/bin/bash
+                        set -euo pipefail
+                        mkdir -p \${WORKSPACE}/build
+                        ENTRY=\$(find . -maxdepth 2 -name '*.nim' | head -1)
+                        nim c -d:mingw -d:release -d:strip \
+                            --opt:size --app:gui \
+                            -o:\${WORKSPACE}/build/tool.exe "\$ENTRY"
+                    """
+                }
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Obfuscate - ConfuserEx') {
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'csharp' && params.OBFUSCATION in ['basic', 'full'] }
+            }
+            agent { label 'windows-dotnet' }
+            steps {
+                unstash 'artifact'
+                script {
+                    def protections = (params.OBFUSCATION == 'full')
+                        ? '<protection id="ctrl flow" />\n    <protection id="ref proxy" />\n    <protection id="rename" />\n    <protection id="anti debug" />\n    <protection id="constants" />\n    <protection id="resources" />'
+                        : '<protection id="rename" />\n    <protection id="ctrl flow" />'
+
+                    def binaries = findFiles(glob: 'build/*.exe') + findFiles(glob: 'build/*.dll')
+                    binaries.each { f ->
+                        def crproj = """\
+<project outputDir="./obfuscated" baseDir="." xmlns="http://confuser.codeplex.com">
+  <rule pattern="true">
+    ${protections}
+  </rule>
+  <module path="${f.path}" />
+</project>"""
+                        writeFile file: 'confuser.crproj', text: crproj
+                        bat 'Confuser.CLI.exe -n confuser.crproj'
+                    }
+                }
+                bat 'xcopy /Y /S obfuscated\\* build\\'
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Obfuscate - Garble') {
+            when {
+                beforeAgent true
+                expression { params.LANGUAGE == 'go' && params.OBFUSCATION == 'garble' }
+            }
+            agent {
+                docker {
+                    image 'maas-builder-go'
+                    label 'linux-go'
+                    args '-v /payloads:/payloads -v /var/cache/maas/gomod:/go/pkg/mod -v /var/cache/maas/gobuild:/root/.cache/go-build'
+                }
+            }
+            steps {
+                unstash 'source'
+                dir("repo/${params.SOURCE_PATH ?: '.'}") {
+                    sh """#!/bin/bash
+                        set -euo pipefail
+                        mkdir -p \${WORKSPACE}/build
+                        GOOS=windows GOARCH=amd64 garble -literals -tiny build \
+                            -ldflags="-s -w" \
+                            -o \${WORKSPACE}/build/ \
+                            ./...
+                    """
+                }
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Obfuscate - Calypso') {
+            when {
+                beforeAgent true
+                expression { params.OBFUSCATION == 'calypso' }
+            }
+            agent {
+                docker {
+                    image 'maas-builder-calypso'
+                    label 'linux-generic'
+                    args '-v /payloads:/payloads'
+                }
+            }
+            steps {
+                unstash 'artifact'
+                script {
+                    def packMode = (params.LANGUAGE == 'csharp') ? '--type csharp' : '--peinject'
+                    def calypsoFlags = params.PACKER_FLAGS ?: ''
+                    sh """#!/bin/bash
+                        set -euo pipefail
+                        for f in build/*.exe; do
+                            [ -f "\$f" ] || continue
+                            ABS_IN="\$(pwd)/\$f"
+                            ABS_OUT="\$(pwd)/\${f%.exe}-packed.exe"
+                            echo "[*] Packing \$f with Calypso (${packMode})"
+                            (cd /opt/calypso && ./calypso --file "\$ABS_IN" ${packMode} --output "\$ABS_OUT" ${calypsoFlags})
+                            mv "\$ABS_OUT" "\$f"
+                        done
+                    """
+                }
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Sign - Limelighter') {
+            when {
+                beforeAgent true
+                expression { params.SIGNING_PROFILE != 'none' && params.SIGNING_PROFILE?.trim() }
+            }
+            agent {
+                docker {
+                    image 'maas-builder-go'
+                    label 'linux-go'
+                    args '-v /payloads:/payloads'
+                }
+            }
+            steps {
+                unstash 'artifact'
+                script {
+                    def profileName = params.SIGNING_PROFILE
+                    def domainMap = [
+                        'microsoft': 'www.microsoft.com',
+                        'google':    'www.google.com',
+                        'intel':     'www.intel.com',
+                        'custom':    'internal-tools.contoso.com'
+                    ]
+                    def domain = domainMap[profileName]
+                    if (!domain) {
+                        error "Unknown signing profile: ${profileName}"
+                    }
+                    def useReal = (profileName != 'custom')
+
+                    if (useReal) {
+                        sh """
+                            for f in build/*.exe build/*.dll; do
+                                [ -f "\$f" ] || continue
+                                echo "[*] Signing \$f with Limelighter (profile: ${profileName}, domain: ${domain})"
+                                Limelighter -I "\$f" -O "\${f}.signed" -Domain "${domain}" -Real
+                                mv "\${f}.signed" "\$f"
+                            done
+                        """
+                    } else {
+                        sh """
+                            for f in build/*.exe build/*.dll; do
+                                [ -f "\$f" ] || continue
+                                echo "[*] Signing \$f with Limelighter (profile: ${profileName}, self-signed: ${domain})"
+                                Limelighter -I "\$f" -O "\${f}.signed" -Domain "${domain}" -Password "changeme"
+                                mv "\${f}.signed" "\$f"
+                            done
+                        """
+                    }
+                }
+                stash includes: 'build/**', name: 'artifact'
+            }
+        }
+
+        stage('Checksum + Archive') {
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'artifact'
+                sh 'cd build && sha256sum * > checksums.sha256 2>/dev/null || true'
+                archiveArtifacts artifacts: 'build/**', fingerprint: true
+            }
+        }
+    }
+
+    post {
+        always {
+            node('linux-generic') {
+                deleteDir()
+            }
+        }
+    }
+}

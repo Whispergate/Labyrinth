@@ -1,0 +1,153 @@
+/*
+ * Jenkinsfile.rollback - Restore a previous payload build
+ *
+ * Lists available archived versions or restores a specific version
+ * by copying it back to /payloads/latest/.
+ *
+ * Archives are stored at /payloads/archive/{loader}/{version}/ and
+ * populated by the main Jenkinsfile's post-success step.
+ */
+
+pipeline {
+    agent { label 'linux-generic' }
+
+    parameters {
+        string(name: 'LOADER', defaultValue: 'loader-c-ollvm', description: 'Loader name')
+        string(name: 'VERSION', defaultValue: '', description: 'Version hash to restore (leave empty for latest)')
+        booleanParam(name: 'LIST_VERSIONS', defaultValue: false, description: 'List available versions instead of restoring')
+    }
+
+    stages {
+        stage('List Versions') {
+            when {
+                expression { params.LIST_VERSIONS }
+            }
+            steps {
+                sh """#!/bin/bash
+                    set -euo pipefail
+                    ARCHIVE="/payloads/archive/${params.LOADER}"
+
+                    if [ ! -d "\$ARCHIVE" ]; then
+                        echo "[!] No archives found for ${params.LOADER}"
+                        echo "    Archive path: \$ARCHIVE"
+                        exit 0
+                    fi
+
+                    echo "=== Archived versions for ${params.LOADER} ==="
+                    echo ""
+                    echo "VERSION         TIMESTAMP                  PROFILE          PE_HASH"
+                    echo "-------------- -------------------------- ---------------- --------"
+
+                    for dir in \$(ls -1t "\$ARCHIVE" 2>/dev/null); do
+                        MANIFEST="\$ARCHIVE/\$dir/manifest.json"
+                        if [ -f "\$MANIFEST" ]; then
+                            TS=\$(python3 -c "import json; print(json.load(open('\$MANIFEST'))['timestamp'])" 2>/dev/null || echo "unknown")
+                            PROF=\$(python3 -c "import json; print(json.load(open('\$MANIFEST')).get('profile','') or '')" 2>/dev/null || echo "")
+                            PE=\$(python3 -c "import json; h=json.load(open('\$MANIFEST')).get('pe_hash',''); print(h[:12] if h else '')" 2>/dev/null || echo "")
+                            printf "%-14s %-26s %-16s %s\\n" "\$dir" "\$TS" "\$PROF" "\$PE"
+                        else
+                            printf "%-14s %-26s %-16s %s\\n" "\$dir" "(no manifest)" "" ""
+                        fi
+                    done
+
+                    echo ""
+                    TOTAL=\$(ls -1 "\$ARCHIVE" 2>/dev/null | wc -l)
+                    echo "Total: \$TOTAL version(s)"
+                """
+            }
+        }
+
+        stage('Resolve Version') {
+            when {
+                expression { !params.LIST_VERSIONS }
+            }
+            steps {
+                script {
+                    if (params.VERSION?.trim()) {
+                        env.RESTORE_VERSION = params.VERSION.trim()
+                    } else {
+                        // Find the latest version (most recently modified directory)
+                        env.RESTORE_VERSION = sh(
+                            script: """
+                                ls -1t /payloads/archive/${params.LOADER}/ 2>/dev/null | head -1
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        if (!env.RESTORE_VERSION) {
+                            error "No archived versions found for ${params.LOADER}"
+                        }
+                        echo "[*] No version specified, using latest: ${env.RESTORE_VERSION}"
+                    }
+                }
+            }
+        }
+
+        stage('Validate') {
+            when {
+                expression { !params.LIST_VERSIONS }
+            }
+            steps {
+                sh """#!/bin/bash
+                    set -euo pipefail
+                    SRC="/payloads/archive/${params.LOADER}/${env.RESTORE_VERSION}"
+
+                    if [ ! -d "\$SRC" ]; then
+                        echo "[-] Version not found: ${env.RESTORE_VERSION}"
+                        echo "    Expected path: \$SRC"
+                        echo ""
+                        echo "Available versions:"
+                        ls -1t /payloads/archive/${params.LOADER}/ 2>/dev/null || echo "  (none)"
+                        exit 1
+                    fi
+
+                    echo "[+] Version directory exists: \$SRC"
+                    ls -la "\$SRC/"
+
+                    if [ -f "\$SRC/manifest.json" ]; then
+                        echo ""
+                        echo "Manifest:"
+                        python3 -c "import json; print(json.dumps(json.load(open('\$SRC/manifest.json')), indent=2))"
+                    fi
+                """
+            }
+        }
+
+        stage('Restore') {
+            when {
+                expression { !params.LIST_VERSIONS }
+            }
+            steps {
+                sh """#!/bin/bash
+                    set -euo pipefail
+                    SRC="/payloads/archive/${params.LOADER}/${env.RESTORE_VERSION}"
+                    DST="/payloads/latest/${params.LOADER}"
+
+                    # Back up current latest (if it exists) before overwriting
+                    if [ -d "\$DST" ] && [ "\$(ls -A \$DST 2>/dev/null)" ]; then
+                        BACKUP="/payloads/archive/${params.LOADER}/_pre-rollback-\$(date +%s)"
+                        echo "[*] Backing up current latest to \$BACKUP"
+                        mkdir -p "\$BACKUP"
+                        cp -r "\$DST"/* "\$BACKUP/" 2>/dev/null || true
+                    fi
+
+                    mkdir -p "\$DST"
+                    cp -r "\$SRC"/* "\$DST/"
+
+                    echo "[+] Restored ${params.LOADER} version ${env.RESTORE_VERSION}"
+                    echo "    Source: \$SRC"
+                    echo "    Target: \$DST"
+                    echo ""
+                    echo "Restored files:"
+                    ls -la "\$DST/"
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            deleteDir()
+        }
+    }
+}

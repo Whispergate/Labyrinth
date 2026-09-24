@@ -1,0 +1,18 @@
+LIBRARY winmm
+EXPORTS
+    PlaySoundA = winmm_orig.PlaySoundA
+    PlaySoundW = winmm_orig.PlaySoundW
+    mciSendCommandA = winmm_orig.mciSendCommandA
+    mciSendCommandW = winmm_orig.mciSendCommandW
+    mciSendStringA = winmm_orig.mciSendStringA
+    mciSendStringW = winmm_orig.mciSendStringW
+    midiOutGetNumDevs = winmm_orig.midiOutGetNumDevs
+    midiOutOpen = winmm_orig.midiOutOpen
+    midiOutClose = winmm_orig.midiOutClose
+    timeGetTime = winmm_orig.timeGetTime
+    timeBeginPeriod = winmm_orig.timeBeginPeriod
+    timeEndPeriod = winmm_orig.timeEndPeriod
+    timeGetDevCaps = winmm_orig.timeGetDevCaps
+    waveOutOpen = winmm_orig.waveOutOpen
+    waveOutClose = winmm_orig.waveOutClose
+    waveOutWrite = winmm_orig.waveOutWrite

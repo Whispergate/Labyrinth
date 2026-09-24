@@ -1,0 +1,24 @@
+profiles:
+  microsoft:
+    domain: "www.microsoft.com"
+    mode: clone
+    description: "Clone Microsoft's code signing certificate"
+
+  google:
+    domain: "www.google.com"
+    mode: clone
+    description: "Clone Google's code signing certificate"
+
+  intel:
+    domain: "www.intel.com"
+    mode: clone
+    description: "Clone Intel's code signing certificate"
+
+  custom:
+    domain: "internal-tools.contoso.com"
+    mode: self-signed
+    password: "changeme"
+    description: "Self-signed with custom domain"
+
+  none:
+    description: "Skip signing"

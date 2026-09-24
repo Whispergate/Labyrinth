@@ -1,0 +1,40 @@
+# Runner auto-scaling configuration for MAAS Jenkins
+# Used by runner-scale.sh to register/remove a third Linux runner
+
+runner:
+  name: "runner-lin03"
+  host: "10.5.99.8"
+  labels: "linux-c linux-go linux-rust linux-nim linux-generic"
+  executors: 2
+  remote_root: "/opt/jenkins-agent"
+  credentials_id: "jenkins-ssh"
+
+# Ludus range entry to add for this runner (add to range-config.yml):
+#
+#   - vm_name: '{{ range_id }}-runner-lin03'
+#     hostname: '{{ range_id }}-runner-lin03'
+#     template: debian-13-x64-server-template
+#     vlan: 99
+#     ip_last_octet: 8
+#     ram_gb: 8
+#     cpus: 4
+#     linux: true
+#     roles:
+#       - whispergate.ludus_jenkins_agent
+#       - whispergate.ludus_maas_builders
+#     role_vars:
+#       ludus_jenkins_url: http://10.{{ range_second_octet }}.99.3:8080
+#       ludus_jenkins_agent_name: runner-lin03
+#       ludus_jenkins_agent_labels: linux-c linux-go linux-rust linux-nim linux-generic
+#       ludus_jenkins_admin_password: JenkinsPW1!
+#       ludus_maas_builder_images:
+#         - maas-builder-c
+#         - maas-builder-go
+#         - maas-builder-rust
+#         - maas-builder-nim
+
+jenkins:
+  url: "http://10.5.99.3:8080"
+  user: "admin"
+  # Password should be provided via environment variable JENKINS_PASS
+  # or read from Jenkins credentials store

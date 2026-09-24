@@ -1,0 +1,261 @@
+/*
+ * Jenkinsfile.matrix - Build Matrix Pipeline
+ *
+ * Compiles the same loader source across multiple language/obfuscation combos
+ * from build-profiles.yml, scans each with LitterBox, and picks the variant
+ * with the lowest detection rate.
+ *
+ * Usage: trigger with a comma-separated list of profile names from
+ * build-profiles.yml (e.g. "evasive-c,garble-go,rust-loader").
+ */
+
+pipeline {
+    agent none
+
+    parameters {
+        string(name: 'LOADER', defaultValue: 'loader-c-ollvm', description: 'Loader to build')
+        string(name: 'SHELLCODE_SOURCE', defaultValue: '', description: 'Mythic payload UUID (leave empty to use SHELLCODE_FILE)')
+        string(name: 'SHELLCODE_FILE', defaultValue: 'shellcode/payload.bin', description: 'Shellcode file path')
+        string(name: 'PROFILES', defaultValue: 'evasive-c,garble-go,rust-loader', description: 'Comma-separated profile names from build-profiles.yml')
+    }
+
+    environment {
+        LITTERBOX_URL    = credentials('litterbox-url')
+        MYTHIC_URL       = credentials('mythic-url')
+        MYTHIC_API_TOKEN = credentials('mythic-api-token')
+    }
+
+    stages {
+        stage('Parse Profiles') {
+            agent { label 'linux-generic' }
+            steps {
+                checkout scm
+                script {
+                    // Load build-profiles.yml and extract requested profiles
+                    def profilesYaml = readYaml file: 'pipeline/build-profiles.yml'
+                    def requestedNames = params.PROFILES.split(',').collect { it.trim() }
+                    env.PROFILE_LIST = requestedNames.join(',')
+
+                    def missing = requestedNames.findAll { !profilesYaml.profiles.containsKey(it) }
+                    if (missing) {
+                        error "Unknown profiles: ${missing.join(', ')}. Available: ${profilesYaml.profiles.keySet().join(', ')}"
+                    }
+
+                    // Store profile configs for later stages
+                    env.PROFILE_COUNT = requestedNames.size().toString()
+                    requestedNames.eachWithIndex { name, idx ->
+                        def p = profilesYaml.profiles[name]
+                        env["PROF_${idx}_NAME"]        = name
+                        env["PROF_${idx}_LANGUAGE"]     = p.language
+                        env["PROF_${idx}_OUTPUT"]       = p.output_format
+                        env["PROF_${idx}_OBFUSCATION"]  = p.obfuscation ?: 'none'
+                        env["PROF_${idx}_PE_SANITISE"]  = (p.pe_sanitise ?: false).toString()
+                        env["PROF_${idx}_SCAN_TYPE"]    = p.scan_type ?: 'all'
+                    }
+
+                    echo "[+] Matrix profiles: ${requestedNames.join(', ')}"
+                }
+            }
+        }
+
+        stage('Matrix Build') {
+            steps {
+                script {
+                    def profileNames = env.PROFILE_LIST.split(',')
+                    def parallelBuilds = [:]
+
+                    profileNames.each { profName ->
+                        parallelBuilds["Build: ${profName}"] = {
+                            stage("Build ${profName}") {
+                                // Trigger the main Jenkinsfile as a downstream job
+                                // Each profile maps to the main pipeline's parameters
+                                def profileData = readYaml(file: 'pipeline/build-profiles.yml').profiles[profName]
+
+                                def downstreamParams = [
+                                    string(name: 'LANGUAGE',          value: profileData.language),
+                                    string(name: 'OUTPUT_FORMAT',     value: profileData.output_format),
+                                    string(name: 'OBFUSCATION',       value: profileData.obfuscation ?: 'none'),
+                                    string(name: 'SHELLCODE_PATH',    value: params.SHELLCODE_FILE),
+                                    string(name: 'MYTHIC_PAYLOAD_UUID', value: params.SHELLCODE_SOURCE ?: ''),
+                                    booleanParam(name: 'LITTERBOX_SCAN', value: false),  // We scan separately
+                                    booleanParam(name: 'PE_SANITISE', value: profileData.pe_sanitise ?: false),
+                                    string(name: 'SCAN_TYPE',         value: profileData.scan_type ?: 'all'),
+                                ]
+
+                                def result = build(
+                                    job: params.LOADER,
+                                    parameters: downstreamParams,
+                                    propagate: false
+                                )
+
+                                if (result.result == 'FAILURE') {
+                                    echo "[-] Build failed for profile: ${profName}"
+                                    env["BUILD_${profName}_STATUS"] = 'FAILED'
+                                } else {
+                                    // Copy artifacts from downstream build
+                                    copyArtifacts(
+                                        projectName: params.LOADER,
+                                        selector: specific(result.number.toString()),
+                                        filter: 'loader.*,checksums.sha256',
+                                        target: "variants/${profName}/",
+                                        flatten: true
+                                    )
+                                    env["BUILD_${profName}_STATUS"] = 'SUCCESS'
+                                    echo "[+] Build succeeded for profile: ${profName}"
+                                }
+                            }
+                        }
+                    }
+
+                    parallel parallelBuilds
+                }
+            }
+        }
+
+        stage('Scan All') {
+            agent { label 'linux-generic' }
+            steps {
+                script {
+                    def profileNames = env.PROFILE_LIST.split(',')
+                    def scanResults = [:]
+
+                    profileNames.each { profName ->
+                        if (env["BUILD_${profName}_STATUS"] != 'SUCCESS') {
+                            echo "[!] Skipping scan for failed build: ${profName}"
+                            scanResults[profName] = [detections: 999, status: 'build_failed']
+                            return
+                        }
+
+                        echo "[*] Scanning variant: ${profName}"
+
+                        def scanOutput = sh(
+                            script: """#!/bin/bash
+                                set -euo pipefail
+                                LB="\${LITTERBOX_URL}"
+                                FILE=\$(ls variants/${profName}/loader.* 2>/dev/null | head -1)
+
+                                if [ -z "\$FILE" ]; then
+                                    echo '{"detections": 999, "status": "no_artifact"}'
+                                    exit 0
+                                fi
+
+                                # Upload to LitterBox
+                                UPLOAD=\$(curl -sf -X POST "\${LB}/upload" \\
+                                    -F "file=@\${FILE};type=application/octet-stream" 2>/dev/null || echo '{}')
+                                MD5=\$(echo "\$UPLOAD" | jq -r '.file_info.md5 // empty')
+
+                                if [ -z "\$MD5" ]; then
+                                    echo '{"detections": 999, "status": "upload_failed"}'
+                                    exit 0
+                                fi
+
+                                # Trigger static scan
+                                curl -sf -X POST "\${LB}/analyze/static/\${MD5}" > /dev/null 2>&1 || true
+                                sleep 5
+
+                                # Trigger dynamic scan
+                                curl -sf -X POST "\${LB}/analyze/dynamic/\${MD5}" > /dev/null 2>&1 || true
+
+                                # Poll for dynamic results
+                                TIMEOUT=300
+                                ELAPSED=0
+                                INTERVAL=2
+                                while [ \$ELAPSED -lt \$TIMEOUT ]; do
+                                    RESULT=\$(curl -sf "\${LB}/api/results/dynamic/\${MD5}" 2>/dev/null || echo '{}')
+                                    STATUS=\$(echo "\$RESULT" | jq -r '.status // empty')
+                                    case "\$STATUS" in
+                                        completed|blocked_by_av|partial|error|agent_unreachable|early_termination|"")
+                                            break ;;
+                                    esac
+                                    sleep \$INTERVAL
+                                    ELAPSED=\$((ELAPSED + INTERVAL))
+                                    INTERVAL=\$(( INTERVAL * 3 / 2 ))
+                                    [ \$INTERVAL -gt 15 ] && INTERVAL=15
+                                done
+
+                                # Fetch risk assessment
+                                RISK=\$(curl -sf "\${LB}/api/results/risk/\${MD5}" 2>/dev/null || echo '{}')
+                                echo "\$RISK" > variants/${profName}/results.json
+
+                                # Extract detection count from static results
+                                STATIC=\$(curl -sf "\${LB}/api/results/static/\${MD5}" 2>/dev/null || echo '{}')
+                                DETECTIONS=\$(echo "\$STATIC" | jq '[.results[]? | select(.detected == true)] | length' 2>/dev/null || echo 0)
+
+                                echo "{\\"detections\\": \${DETECTIONS:-0}, \\"status\\": \\"scanned\\", \\"md5\\": \\"\${MD5}\\", \\"risk\\": \$(echo "\$RISK" | jq -r '.risk_level // \\"unknown\\"')}"
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        def parsed = readJSON text: scanOutput
+                        scanResults[profName] = parsed
+                        env["SCAN_${profName}_DETECTIONS"] = parsed.detections.toString()
+                        echo "[+] ${profName}: ${parsed.detections} detections (${parsed.status})"
+                    }
+
+                    // Store results summary as JSON
+                    writeJSON file: 'scan-summary.json', json: scanResults
+                }
+            }
+        }
+
+        stage('Select Best') {
+            agent { label 'linux-generic' }
+            steps {
+                script {
+                    def profileNames = env.PROFILE_LIST.split(',')
+                    def bestProfile = null
+                    def bestDetections = 999
+
+                    echo "=== Matrix Build Results ==="
+                    profileNames.each { profName ->
+                        def detections = (env["SCAN_${profName}_DETECTIONS"] ?: '999').toInteger()
+                        def status = env["BUILD_${profName}_STATUS"] ?: 'UNKNOWN'
+                        echo "  ${profName}: ${detections} detections (build: ${status})"
+
+                        if (status == 'SUCCESS' && detections < bestDetections) {
+                            bestDetections = detections
+                            bestProfile = profName
+                        }
+                    }
+
+                    if (!bestProfile) {
+                        error "No successful builds to select from"
+                    }
+
+                    echo ""
+                    echo "[+] Best variant: ${bestProfile} (${bestDetections} detections)"
+                    env.BEST_PROFILE = bestProfile
+                    env.BEST_DETECTIONS = bestDetections.toString()
+
+                    // Copy best variant to /payloads/latest/
+                    sh """
+                        mkdir -p /payloads/latest/${params.LOADER}/
+                        cp variants/${bestProfile}/loader.* /payloads/latest/${params.LOADER}/
+                        [ -f variants/${bestProfile}/checksums.sha256 ] && \
+                            cp variants/${bestProfile}/checksums.sha256 /payloads/latest/${params.LOADER}/
+                        [ -f variants/${bestProfile}/results.json ] && \
+                            cp variants/${bestProfile}/results.json /payloads/latest/${params.LOADER}/
+                        echo "${bestProfile}" > /payloads/latest/${params.LOADER}/selected-profile.txt
+                        echo "[+] Deployed ${bestProfile} to /payloads/latest/${params.LOADER}/"
+                    """
+
+                    // Archive all variants with scores
+                    archiveArtifacts artifacts: 'variants/**/*,scan-summary.json', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            node('linux-generic') {
+                deleteDir()
+            }
+        }
+        success {
+            node('linux-generic') {
+                echo "[+] Matrix complete. Best: ${env.BEST_PROFILE} (${env.BEST_DETECTIONS} detections)"
+            }
+        }
+    }
+}

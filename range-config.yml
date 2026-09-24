@@ -90,11 +90,11 @@ ludus:
         - ansicolor
       ludus_jenkins_static_agents:
         - name: runner-lin01
-          labels: linux-c linux-go linux-nim linux-generic
+          labels: linux-c linux-go linux-rust linux-nim linux-generic
           remote_fs: /opt/jenkins-agent
           executors: 2
         - name: runner-lin02
-          labels: linux-c linux-go linux-nim linux-generic
+          labels: linux-c linux-go linux-rust linux-nim linux-generic
           remote_fs: /opt/jenkins-agent
           executors: 2
         - name: runner-win01
@@ -115,12 +115,14 @@ ludus:
     role_vars:
       ludus_jenkins_url: http://10.{{ range_second_octet }}.99.3:8080
       ludus_jenkins_agent_name: runner-lin01
-      ludus_jenkins_agent_labels: linux-c linux-go linux-nim linux-generic
+      ludus_jenkins_agent_labels: linux-c linux-go linux-rust linux-nim linux-generic
       ludus_jenkins_admin_password: JenkinsPW1!
       ludus_maas_builder_images:
         - maas-builder-c
         - maas-builder-go
+        - maas-builder-rust
         - maas-builder-nim
+        - maas-builder-calypso
   - vm_name: '{{ range_id }}-runner-lin02'
     hostname: '{{ range_id }}-runner-lin02'
     template: debian-13-x64-server-template
@@ -135,12 +137,14 @@ ludus:
     role_vars:
       ludus_jenkins_url: http://10.{{ range_second_octet }}.99.3:8080
       ludus_jenkins_agent_name: runner-lin02
-      ludus_jenkins_agent_labels: linux-c linux-go linux-nim linux-generic
+      ludus_jenkins_agent_labels: linux-c linux-go linux-rust linux-nim linux-generic
       ludus_jenkins_admin_password: JenkinsPW1!
       ludus_maas_builder_images:
         - maas-builder-c
         - maas-builder-go
+        - maas-builder-rust
         - maas-builder-nim
+        - maas-builder-calypso
   - vm_name: '{{ range_id }}-mythic'
     hostname: '{{ range_id }}-mythic'
     template: ubuntu-24.04-x64-server-template
@@ -201,8 +205,11 @@ ludus:
       ludus_litterbox_host: 0.0.0.0
       ludus_litterbox_port: 1337
       ludus_litterbox_elastic_enabled: true
+      ludus_litterbox_elastic_auto_apikey: true
       ludus_litterbox_elastic_agent_ip: 10.{{ range_second_octet }}.10.11
       ludus_litterbox_elastic_url: 10.{{ range_second_octet }}.10.10:9200
+      ludus_litterbox_elastic_username: elastic
+      ludus_litterbox_elastic_password: elasticpassword
   - vm_name: '{{ range_id }}-threathunting'
     hostname: '{{ range_id }}-threathunting'
     template: ubuntu-24.04-x64-server-template
